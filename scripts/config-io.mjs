@@ -199,6 +199,9 @@ function scan(ws) {
       description: installed[id] ? pluginDescription(installed[id].installPath) : "",
       globalState,
       projectState,
+      // 面板只能写 local；shared 是被仓库共享的团队配置，单独列出以便界面说明「跟随」会落到哪一层。
+      localState: getPluginState(local, id),
+      sharedState: getPluginState(shared, id),
       effectiveState: effectiveState(projectState, globalState),
     });
   }
@@ -256,6 +259,8 @@ function scan(ws) {
       description: mcpDescription(config),
       globalState,
       projectState,
+      localState: getMcpState(local, name),
+      sharedState: getMcpState(shared, name),
       canEnable: !deniedGlobally,
       effectiveState: deniedGlobally ? "off" : effectiveState(projectState, "on"),
     };
@@ -289,6 +294,8 @@ function scan(ws) {
       description: s.description || "",
       globalState,
       projectState,
+      localState: getSkillState(local, s.name),
+      sharedState: getSkillState(shared, s.name),
       effectiveState: effectiveState(projectState, globalState),
       controllable: s.source !== "plugin",
     };

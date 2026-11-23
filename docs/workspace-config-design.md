@@ -113,9 +113,22 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 - plugin 技能行显示「由插件控制」徽标
 - 保存后提示生效方式：插件 `/reload-plugins`，MCP 与技能新会话
 
+### 6.1 分层显示
+
+配置实际有 local / 团队（shared）/ 全局三层，而面板只写 local，因此每行同时给出两套状态：
+
+| 字段 | 含义 | 用途 |
+|---|---|---|
+| `localState` | 只看 `.claude/settings.local.json` | **控件选中态**、批量统计、覆盖筛选 |
+| `sharedState` | 只看 `.claude/settings.json` | 标记团队来源 |
+| `projectState` | local 压过 shared 的合并结果 | 排序、生效计算 |
+| `effectiveState` | 再叠上全局后的最终值 | 绿点提示 |
+
+团队层有显式值时，「跟随」按钮改为「跟随团队（配置）」，tooltip 说明清除本地覆盖后会回到团队配置；meta 行追加「团队禁用 / 团队启用」。MCP 因 `deniedMcpServers` 跨层 union，团队层禁用后本地无法解除：meta 标注「本地不可解除」，并把「跟随」按钮置灰。
+
 ## 7. 已知限制
 
-1. `skillOverrides` 的跨层合并（项目 `on` 能否压过 user `off`）文档未单独举证，需实测；若不成立，技能 `on` 退化为仅显示
+1. ~~`skillOverrides` 的跨层合并需实测~~ 已实测（Claude Code 2.1.319）：项目层 `on` 能压过 user 层 `off`，双向成立，团队层同样参与
 2. MCP 只有 deny 语义，没有反向启用
 3. plugin 技能无法单独禁用
 4. 共享包 `validate-core` 未覆盖 `registerPanelTab` 的权限检测，产生一条固定 warn

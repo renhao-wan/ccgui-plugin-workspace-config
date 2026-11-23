@@ -314,10 +314,26 @@ export default function activate(ctx) {
     return Object.assign({}, row, { busy, allowOn });
   }
 
-  function metaOf(row) {
+  // sharedState / localState 由 scan 分别给出：前者是仓库里的 .claude/settings.json（团队层），
+  // 后者是面板真正能写的 .claude/settings.local.json。projectState 是二者合并后的结果。
+  const teamTouched = (row) => Boolean(row.sharedState && row.sharedState !== "inherit");
+
+  /** 团队层的显式值；侧栏空间有限，只在 compact 时省略括号说明。 */
+  function teamNote(row, compact) {
+    if (!teamTouched(row)) return "";
+    const word = row.sharedState === "off" ? "团队禁用" : "团队启用";
+    // MCP 的 deniedMcpServers 跨层 union，团队禁用的条目在本地没有任何办法解除。
+    if (row.kind === "mcp" && row.sharedState === "off" && !compact) {
+      return word + "（本地不可解除）";
+    }
+    return word;
+  }
+
+  function metaOf(row, compact) {
+    const team = teamNote(row, compact);
     if (row.kind === "plugin") {
       const g = row.globalState === "on" ? "全局启用" : row.globalState === "off" ? "全局禁用" : "全局未记录";
-      return ["插件", row.marketplace || "未知市场", g, row.installed ? "" : "未安装"]
+      return ["插件", row.marketplace || "未知市场", g, team, row.installed ? "" : "未安装"]
         .filter(Boolean).join(" · ");
     }
     if (row.kind === "mcp") {
@@ -325,20 +341,33 @@ export default function activate(ctx) {
       const src = row.scope === "plugin"
         ? "继承自插件 " + (row.plugin || "内置")
         : "继承 " + row.scope;
-      return ["MCP", src, g].join(" · ");
+      return ["MCP", src, g, team].filter(Boolean).join(" · ");
     }
     const src = row.source === "plugin"
       ? "插件 " + (row.plugin || "")
       : row.source === "personal" ? "个人" : "项目";
     const g = row.globalState === "off" ? "全局禁用" : "全局可用";
-    return ["技能", src, g, row.shadowed ? "同名个人版优先" : ""].filter(Boolean).join(" · ");
+    return ["技能", src, g, team, row.shadowed ? "同名个人版优先" : ""].filter(Boolean).join(" · ");
   }
 
   function Seg({ row, compact }) {
+    const team = teamTouched(row);
+    // 选中态必须落在 local：面板只写 settings.local.json，落在合并结果上会让点击「跟随」后按钮弹回。
+    const active = row.localState !== undefined ? row.localState : row.projectState;
+    const followLabel = compact
+      ? (team ? "跟随团队" : "跟随")
+      : (team ? "跟随团队配置" : "跟随全局");
+    const followTitle = team
+      ? (row.kind === "mcp" && row.sharedState === "off"
+          ? "团队配置已禁用；MCP 的禁用名单跨层合并，本地无法解除"
+          : "清除本地覆盖后，生效值来自团队配置 .claude/settings.json")
+      : "不写项目配置，沿用全局";
+    // 团队层已禁用 MCP 时，本地写什么都不会生效，「跟随」按钮保持可见但禁用，避免点了没反应。
+    const followDead = row.kind === "mcp" && row.sharedState === "off";
     const opts = row.kind === "mcp"
-      ? [[compact ? "跟随" : "跟随全局", "inherit"], [compact ? "关闭" : "项目禁用", "off"]]
+      ? [[followLabel, "inherit"], [compact ? "关闭" : "项目禁用", "off"]]
       : [
-          [compact ? "跟随" : "跟随全局", "inherit"],
+          [followLabel, "inherit"],
           [compact ? "开" : "启用", "on"],
           [compact ? "关" : "禁用", "off"],
         ];
@@ -347,13 +376,13 @@ export default function activate(ctx) {
         h("button", {
           key: value,
           type: "button",
-          className: "wc-btn" + (row.projectState === value ? " wc-on" : ""),
-          disabled: row.busy || (value === "on" && !row.allowOn),
+          className: "wc-btn" + (active === value ? " wc-on" : ""),
+          disabled: row.busy || (value === "on" && !row.allowOn) || (value === "inherit" && followDead),
           title: value === "on" && !row.allowOn
             ? "当前无法启用"
-            : value === "inherit" ? "不写项目配置，沿用全局" : undefined,
+            : value === "inherit" ? followTitle : undefined,
           onClick: () => {
-            if (row.busy || row.projectState === value) return;
+            if (row.busy || active === value) return;
             void apply(row, value);
           },
         }, label)
@@ -380,7 +409,7 @@ export default function activate(ctx) {
           }),
           row.name
         ),
-        h("div", { className: "wc-meta" }, metaOf(row)),
+        h("div", { className: "wc-meta" }, metaOf(row, compact)),
         showDesc && row.description
           ? h("div", { className: "wc-desc", title: row.description }, row.description)
           : null
@@ -395,9 +424,15 @@ export default function activate(ctx) {
     );
   }
 
+  // 批量操作只写 local，所以「已覆盖」也只能按 localState 统计；
+  // 团队层的值会在点「跟随」后重新生效，不该算成用户可清除的覆盖。
+  const locallyOverridden = (row) => row.localState !== undefined
+    ? row.localState !== "inherit"
+    : row.projectState !== "inherit";
+
   function BulkBar({ rows, filtered, busy }) {
     const [confirming, setConfirming] = useState("");
-    const overridden = rows.filter((row) => row.projectState !== "inherit");
+    const overridden = rows.filter(locallyOverridden);
 
     if (!confirming) {
       return h("div", { className: "wc-bulk" },
@@ -455,11 +490,11 @@ export default function activate(ctx) {
     ];
     return h("div", { className: "wc-stats" },
       groups.map((g) => {
-        const covered = g.rows.filter((row) => row.projectState !== "inherit").length;
+        const covered = g.rows.filter(locallyOverridden).length;
         return h("div", { className: "wc-stat", key: g.label },
           h("div", { className: "wc-stat-num" }, g.rows.length),
           h("div", { className: "wc-stat-label" },
-            g.label + (covered ? " · 项目覆盖 " + covered : " · 全部跟随全局"))
+            g.label + (covered ? " · 本地覆盖 " + covered : " · 本地未覆盖"))
         );
       })
     );
@@ -541,7 +576,7 @@ export default function activate(ctx) {
       h("div", { className: "wc-center-layout" },
         h("nav", { className: "wc-nav" },
           groups.map((g) => {
-            const covered = g.rows.filter((row) => row.projectState !== "inherit").length;
+            const covered = g.rows.filter(locallyOverridden).length;
             return h("button", {
               key: g.key,
               type: "button",
@@ -565,8 +600,9 @@ export default function activate(ctx) {
           h("button", {
             type: "button",
             className: "wc-filter" + (s.onlyOverridden ? " wc-on" : ""),
+            title: "只显示在 settings.local.json 里被本机改过的项",
             onClick: () => set({ onlyOverridden: !s.onlyOverridden }),
-          }, "只看项目覆盖")
+          }, "只看本地覆盖")
         )
       )
     );
@@ -597,7 +633,7 @@ export default function activate(ctx) {
       const only = Boolean(s.onlyOverridden);
       const visible = (rows) => rows.filter((row) =>
         (!q || String(row.name).toLowerCase().includes(q)) &&
-        (!only || row.projectState !== "inherit")
+        (!only || locallyOverridden(row))
       );
       const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
       const current = groups.find((g) => g.key === active);

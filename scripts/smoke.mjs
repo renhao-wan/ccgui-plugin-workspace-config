@@ -183,6 +183,47 @@ run(["set", ws, "skill", "project-skill", "inherit"]);
 const restored = JSON.parse(fs.readFileSync(localPath, "utf8"));
 assert.deepEqual(restored, {}, "全部改回跟随全局后不应留下空键");
 
+/* ------------------------------------------------------------ 团队层 */
+
+// 仓库里的 .claude/settings.json（团队层）：面板只读，写入永远只落 local。
+fs.writeFileSync(
+  path.join(ws, ".claude", "settings.json"),
+  JSON.stringify({
+    enabledPlugins: { "alpha@market": false },
+    skillOverrides: { "project-skill": "off" },
+    deniedMcpServers: [{ serverName: "proj-one" }],
+  }, null, 2),
+);
+
+const teamScan = run(["scan", ws]);
+const tp = byId(teamScan.plugins);
+assert.equal(tp["alpha@market"].localState, "inherit", "localState 不能混进团队层");
+assert.equal(tp["alpha@market"].sharedState, "off", "sharedState 要单独反映团队层");
+assert.equal(tp["alpha@market"].projectState, "off", "projectState 仍是合并结果");
+assert.equal(tp["alpha@market"].effectiveState, "off");
+assert.equal(tp["alpha@market"].globalState, "on");
+
+const tm = byId(teamScan.mcp);
+assert.equal(tm["proj-one"].localState, "inherit");
+assert.equal(tm["proj-one"].sharedState, "off");
+
+const ts = teamScan.skills.find((s) => s.name === "project-skill");
+assert.equal(ts.localState, "inherit");
+assert.equal(ts.sharedState, "off");
+
+// 插件与技能：local 能压过团队层
+run(["set", ws, "plugin", "alpha@market", "on"]);
+const overridden2 = byId(run(["scan", ws]).plugins);
+assert.equal(overridden2["alpha@market"].localState, "on");
+assert.equal(overridden2["alpha@market"].projectState, "on");
+assert.equal(overridden2["alpha@market"].effectiveState, "on");
+
+// 清掉 local 覆盖后，团队层重新生效——这正是「跟随」需要显式说明的场景
+run(["set", ws, "plugin", "alpha@market", "inherit"]);
+const backToTeam = byId(run(["scan", ws]).plugins);
+assert.equal(backToTeam["alpha@market"].localState, "inherit");
+assert.equal(backToTeam["alpha@market"].effectiveState, "off");
+
 /* ------------------------------------------------------------ UI 渲染 */
 
 // 真实渲染面板与中央页签：未定义变量、组件调用写错这类问题只有渲染时才暴露。
@@ -256,6 +297,10 @@ assert.deepEqual(restored, {}, "全部改回跟随全局后不应留下空键");
   assert.match(panelText, /插件/);
   assert.match(panelText, /MCP/);
   assert.match(panelText, /技能/);
+  // 团队层有显式值时：meta 要标出来源，按钮要改口「跟随团队」，不能装作在跟随全局。
+  assert.match(panelText, /团队禁用/, "团队层禁用没有在面板上标出");
+  assert.match(panelText, /跟随团队/, "团队层有值时「跟随」按钮文案应变成跟随团队");
+  assert.ok(!/跟随全局/.test(panelText), "团队层有值时仍显示「跟随全局」会误导");
 
   // 中央页签：先在面板里拿到工作区，再渲染大屏。
   const Center = registered.center.component;
@@ -289,5 +334,5 @@ assert.deepEqual(restored, {}, "全部改回跟随全局后不应留下空键");
   console.log("UI_OK panel/center/settings 渲染通过");
 }
 
-console.log("SMOKE_OK checks=42");
+console.log("SMOKE_OK checks=59");
 console.log("main.js", fs.statSync(MAIN).size, "bytes; manifest", MANIFEST.id);
