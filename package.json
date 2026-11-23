@@ -1,0 +1,21 @@
+{
+  "name": "ccgui-plugin-workspace-config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "工作区配置：按项目开关 MCP、插件与技能，只写项目级配置",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/",
+    "smoke": "node scripts/smoke.mjs",
+    "validate": "node scripts/validate-manifest.mjs",
+    "check": "npm run build && npm test && npm run smoke && npm run validate",
+    "shared:check": "shared-version"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.1.2"
+  }
+}

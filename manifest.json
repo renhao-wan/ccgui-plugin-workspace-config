@@ -1,0 +1,25 @@
+{
+  "id": "workspace-config",
+  "name": "工作区配置",
+  "version": "0.1.0",
+  "sdkVersion": "^0.3",
+  "author": "renhao-wan",
+  "repo": "renhao-wan/ccgui-plugin-workspace-config",
+  "license": "MIT",
+  "icon": "docs/icon.png",
+  "description": "按工作区开关 MCP、插件与技能；只写项目级配置，不影响全局",
+  "tier": "js",
+  "permissions": [
+    "ui:panel-tab",
+    "ui:center-tab",
+    "ui:sidebar-entry",
+    "ui:command",
+    "ui:settings-section",
+    "storage",
+    "plugin.storage",
+    "theme",
+    "host:workspace",
+    "exec:node",
+    "network:none"
+  ]
+}
