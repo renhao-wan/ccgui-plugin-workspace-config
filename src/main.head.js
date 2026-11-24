@@ -39,11 +39,28 @@ const STYLE = `
 .wc-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 12px 20px; box-sizing: border-box; }
 .wc-center .wc-scroll { width: 100%; max-width: none; padding: 0 32px 36px; box-sizing: border-box; }
 .wc-page-fixed { flex: none; padding: 0 32px; }
-.wc-page-head { display: flex; align-items: center; justify-content: space-between; padding: 22px 0 16px; }
-.wc-page-title { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+.wc-page-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 32px 14px; }
+.wc-page-head-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.wc-page-head-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.wc-page-title { font-size: 22px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+/* 收起态：整条压扁成一行，标题右边挂概览 chips，把纵向空间还给列表 */
+.wc-head-collapsed { padding: 10px 32px; border-bottom: 1px solid rgba(127,127,127,.16); }
+/* 分隔线贴着标题走，留白放到线下方——收起后页头只剩一条标题行，
+   原本由统计区撑开的呼吸空间要补回来，否则列表直接顶着分隔线。 */
+.wc-head-collapsed + .wc-page-fixed + .wc-center-scroll { padding-top: 22px; }
+.wc-head-collapsed .wc-page-title { font-size: 15px; }
+.wc-head-chips { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.wc-chip { flex: none; padding: 2px 9px; border-radius: 999px; background: rgba(127,127,127,.09); font-size: 11.5px; line-height: 18px; opacity: .85; white-space: nowrap; }
+.wc-chip-accent { background: rgba(79,140,255,.15); opacity: 1; }
+.wc-chip-warn { background: rgba(217,83,79,.14); color: #c92a2a; opacity: 1; }
+.wc-icon-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; opacity: .6; }
+.wc-icon-btn:hover { opacity: 1; background: rgba(127,127,127,.09); }
+.wc-caret-glyph { display: block; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid currentColor; transition: transform .15s ease; }
+.wc-caret-glyph.wc-up { transform: rotate(180deg); }
 .wc-page-sub { margin: 0 0 18px; font-size: 12px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-toolbar { display: flex; gap: 10px; margin: 0 0 18px; }
 .wc-detail-bar { display: flex; gap: 10px; }
+.wc-toolbar-row { margin: 0 0 18px; }
 .wc-search { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 7px 11px; border: 1px solid rgba(127,127,127,.22); border-radius: 8px; background: rgba(127,127,127,.04); color: inherit; outline: none; }
 .wc-search:focus { border-color: rgba(79,140,255,.5); }
 .wc-filter { flex: none; font: inherit; font-size: 12px; padding: 7px 12px; border: 1px solid rgba(127,127,127,.22); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
@@ -54,23 +71,34 @@ const STYLE = `
 .wc-center .wc-sec h3 { font-size: 13px; }
 .wc-center .wc-card { padding: 0 14px; }
 .wc-center .wc-stat-num { font-size: 26px; }
-.wc-center-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }
-.wc-nav { display: flex; flex-direction: column; gap: 2px; }
-.wc-nav-item { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font: inherit; font-size: 13px; text-align: left; padding: 9px 12px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
+.wc-center-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; }
+.wc-nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
+.wc-nav-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: inherit; font-size: 13px; text-align: left; padding: 9px 12px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
 .wc-nav-item:hover { background: rgba(127,127,127,.06); }
 .wc-nav-item.wc-on { background: rgba(79,140,255,.12); font-weight: 600; }
-.wc-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wc-nav-count { flex: none; font-size: 11px; opacity: .55; font-weight: 400; }
+.wc-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-nav-counts { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 400; }
+.wc-nav-num { opacity: .5; }
+.wc-nav-badge { padding: 0 5px; border-radius: 999px; background: rgba(79,140,255,.18); color: inherit; font-size: 10.5px; line-height: 16px; }
+.wc-nav-item:not(.wc-on) .wc-nav-badge { background: rgba(79,140,255,.12); opacity: .8; }
 .wc-detail { min-width: 0; }
-@media (max-width: 880px) { .wc-center-layout { grid-template-columns: 1fr; } .wc-nav { position: static; flex-direction: row; overflow-x: auto; } }
+.wc-detail .wc-sec { margin: 0; }
+/* 窄屏：导航翻到顶部做横向滚动条，详情独占一行 */
+@media (max-width: 880px) {
+  .wc-center-layout { grid-template-columns: 1fr; gap: 14px; }
+  .wc-nav { position: static; flex-direction: row; overflow-x: auto; padding-bottom: 2px; }
+  .wc-nav-item { flex: none; padding: 6px 10px; font-size: 12px; }
+}
 .wc-path { margin: 0 0 12px; font-size: 11px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-sec { margin: 14px 0; }
-.wc-sec h3 { margin: 0 0 6px 2px; font-size: 12px; font-weight: 600; opacity: .7; }
+.wc-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 6px 2px; }
+.wc-sec-head h3 { margin: 0; font-size: 12px; font-weight: 600; opacity: .7; }
+.wc-tabbar { flex: none; padding: 10px 12px 0; }
+.wc-tabbar .wc-tabs { margin: 0; }
 .wc-tabs { display: flex; gap: 4px; margin: 0 0 10px; padding: 3px; background: rgba(127,127,127,.06); border-radius: 9px; }
+.wc-compact .wc-tabs { margin: 0; }
 .wc-tab { flex: 1; min-width: 0; font: inherit; font-size: 12px; padding: 6px 4px; border: 0; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wc-tab.wc-on { background: rgba(127,127,127,.16); font-weight: 600; }
-.wc-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
-@media (max-width: 880px) { .wc-grid { grid-template-columns: 1fr; } }
 .wc-card { background: rgba(127,127,127,.055); border: 1px solid rgba(127,127,127,.14); border-radius: 10px; padding: 0 12px; }
 .wc-compact .wc-card { padding: 0 10px; }
 .wc-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(127,127,127,.12); }
@@ -175,9 +203,9 @@ const STYLE = `
 `;
 
 export default function activate(ctx) {
-  const { createElement: h, useEffect, useState } = ctx.react;
+  const { createElement: h, useEffect, useState, useRef } = ctx.react;
 
-  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false };
+  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true };
   const subs = new Set();
 
   // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
@@ -212,8 +240,13 @@ export default function activate(ctx) {
 
   async function saveSettings(patch) {
     settingsTouched = true;
-    const next = Object.assign({ showDesc: false }, store.settings, patch);
-    set({ settings: next, showDesc: Boolean(next.showDesc) });
+    // 默认收起：列表优先。只有用户明确展开过（存了 false）才恢复展开。
+    const next = Object.assign({ showDesc: false, headCollapsed: true }, store.settings, patch);
+    set({
+      settings: next,
+      showDesc: Boolean(next.showDesc),
+      headCollapsed: Boolean(next.headCollapsed),
+    });
     try {
       await ctx.storage.set(SETTINGS_KEY, next);
     } catch {
@@ -225,7 +258,12 @@ export default function activate(ctx) {
     try {
       const saved = await ctx.storage.get(SETTINGS_KEY);
       if (settingsTouched || !saved || typeof saved !== "object") return;
-      set({ settings: saved, showDesc: Boolean(saved.showDesc) });
+      set({
+        settings: saved,
+        showDesc: Boolean(saved.showDesc),
+        // 旧版本没存过这个键时按默认值（收起）处理，Boolean(undefined) 会误判成展开。
+        headCollapsed: saved.headCollapsed !== false,
+      });
     } catch {
       // 没有保存过设置时沿用默认值
     }
@@ -643,6 +681,7 @@ export default function activate(ctx) {
   function Diagnostics({ data }) {
     const [confirming, setConfirming] = useState(false);
     const list = data.diagnostics || [];
+    // 一切正常就整块不渲染：占一行绿色回执只会挤占列表空间。
     if (list.length === 0) return null;
     const fixable = list.filter((d) => d.fixable);
     const clean = () => {
@@ -718,13 +757,18 @@ export default function activate(ctx) {
     );
   }
 
-  function Section({ title, rows, empty, compact, hideTitle, foldLocked, showDesc }) {
+  function Section({ title, rows, empty, compact, hideTitle, foldLocked, showDesc, action }) {
     const [foldOpen, setFoldOpen] = useState(false);
     const sorted = sortRows(rows);
     const main = foldLocked ? sorted.filter((row) => row.controllable !== false) : sorted;
     const locked = foldLocked ? sorted.filter((row) => row.controllable === false) : [];
     return h("section", { className: "wc-sec" },
-      hideTitle ? null : h("h3", null, title),
+      hideTitle && !action
+        ? null
+        : h("div", { className: "wc-sec-head" },
+            hideTitle ? h("span", null) : h("h3", null, title),
+            action || null
+          ),
       h("div", { className: "wc-card" },
         main.length === 0
           ? h("p", { className: "wc-empty" }, empty)
@@ -790,48 +834,45 @@ export default function activate(ctx) {
     );
   }
 
-  function BodyHead({ data, s }) {
-    const groups = [
-      { key: "plugin", title: "插件", rows: data.plugins || [] },
-      { key: "mcp", title: "MCP", rows: data.mcp || [] },
-      { key: "skill", title: "技能", rows: data.skills || [] },
-    ];
-    return h("div", { className: "wc-body" },
-      h("p", { className: "wc-page-sub", title: data.workspace },
-        "工作区：" + data.workspace + " · 只影响当前工作区，全局配置由 CC Switch 管理。"),
-      h(Stats, { data }),
-      h(Diagnostics, { data }),
-      h("div", { className: "wc-center-layout" },
-        h("nav", { className: "wc-nav" },
-          groups.map((g) => {
-            const covered = g.rows.filter(locallyOverridden).length;
-            return h("button", {
-              key: g.key,
-              type: "button",
-              className: "wc-nav-item" + (s.activeKind === g.key ? " wc-on" : ""),
-              onClick: () => set({ activeKind: g.key }),
-            },
-              h("span", { className: "wc-nav-label" }, g.title),
-              h("span", { className: "wc-nav-count" },
-                String(g.rows.length) + (covered ? " · " + covered + " 覆盖" : ""))
-            );
-          })
-        ),
-        h("div", { className: "wc-detail-bar" },
-          h("input", {
-            className: "wc-search",
-            type: "search",
-            placeholder: "搜索当前类别",
-            value: s.query || "",
-            onChange: (e) => set({ query: e.target.value }),
-          }),
-          h("button", {
-            type: "button",
-            className: "wc-filter" + (s.onlyOverridden ? " wc-on" : ""),
-            title: "只显示在 settings.local.json 里被本机改过的项",
-            onClick: () => set({ onlyOverridden: !s.onlyOverridden }),
-          }, "只看本地覆盖")
-        )
+  // 顶部区（统计 + 诊断 + 工具栏）可整体收起，把纵向空间还给列表。
+  // 收起后仍留一条紧凑条：标题、条数、覆盖数、诊断数都还在，双击或点按钮展开。
+  function CenterHeader({ data, s, groups, active }) {
+    const collapsed = Boolean(s.headCollapsed);
+    const overridden = (data.plugins || []).concat(data.mcp || [], data.skills || [])
+      .filter(locallyOverridden).length;
+    const diagCount = (data.diagnostics || []).length;
+    const toggle = () => { void saveSettings({ headCollapsed: !collapsed }); };
+
+    return h("div", { className: "wc-page-head" + (collapsed ? " wc-head-collapsed" : "") },
+      h("div", { className: "wc-page-head-main" },
+        h("div", { className: "wc-page-title" }, "工作区配置"),
+        collapsed
+          ? h("span", { className: "wc-head-chips" },
+              h("span", { className: "wc-chip" },
+                (data.plugins || []).length + " 插件 · " + (data.mcp || []).length + " MCP · " + (data.skills || []).length + " 技能"),
+              overridden > 0
+                ? h("span", { className: "wc-chip wc-chip-accent" }, "覆盖 " + overridden)
+                : null,
+              diagCount > 0
+                ? h("span", { className: "wc-chip wc-chip-warn" }, "诊断 " + diagCount)
+                : null
+            )
+          : null
+      ),
+      h("div", { className: "wc-page-head-actions" },
+        h("button", {
+          type: "button",
+          className: "wc-icon-btn",
+          title: collapsed ? "展开统计与筛选" : "收起统计与筛选，给列表更多空间",
+          "aria-expanded": collapsed ? "false" : "true",
+          onClick: toggle,
+        }, h("span", { className: "wc-caret-glyph" + (collapsed ? "" : " wc-up") })),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
+          disabled: s.loading,
+          onClick: () => { if (s.ws) void refresh(s.ws); },
+        }, s.loading ? "读取中…" : "刷新")
       )
     );
   }
@@ -839,7 +880,7 @@ export default function activate(ctx) {
   function Body({ mode, part }) {
     const s = useStore();
     if (!s.data) {
-      if (part === "list") return null;
+      if (part === "list" || part === "tabs") return null;
       return h("div", { className: "wc-body" },
         s.loading
           ? h("p", { className: "wc-empty" }, "读取中…")
@@ -855,48 +896,103 @@ export default function activate(ctx) {
     const tip = h("p", { className: "wc-tip" },
       "只写项目级 .claude/settings.local.json；全局配置不受影响。");
 
+    const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
+    const current = groups.find((g) => g.key === active);
+
     if (mode === "center") {
-      if (part === "head") return h(BodyHead, { data, s });
+      // 头部拆成两段：标题栏（CenterHeader）常驻，统计/诊断/工具栏随「收起」隐藏。
+      if (part === "head" && !s.headCollapsed) {
+        return h("div", { className: "wc-body" },
+          h("p", { className: "wc-page-sub", title: data.workspace },
+            "工作区：" + data.workspace + " · 只影响当前工作区，全局配置由 CC Switch 管理。"),
+          h(Stats, { data }),
+          h(Diagnostics, { data }),
+          h("div", { className: "wc-detail-bar wc-toolbar-row" },
+            h("input", {
+              className: "wc-search",
+              type: "search",
+              placeholder: "搜索当前类别：" + current.title,
+              value: s.query || "",
+              onChange: (e) => set({ query: e.target.value }),
+            }),
+            h("button", {
+              type: "button",
+              className: "wc-filter" + (s.onlyOverridden ? " wc-on" : ""),
+              title: "只显示在 settings.local.json 里被本机改过的项",
+              onClick: () => set({ onlyOverridden: !s.onlyOverridden }),
+            }, "只看本地覆盖")
+          )
+        );
+      }
+      if (part === "head") return null;
       const q = String(s.query || "").trim().toLowerCase();
       const only = Boolean(s.onlyOverridden);
-      const visible = (rows) => rows.filter((row) =>
+      // 搜索与筛选只作用于当前类别：一次只看一类，不存在「搜了三个列表」的歧义。
+      const visible = current.rows.filter((row) =>
         (!q || String(row.name).toLowerCase().includes(q)) &&
         (!only || locallyOverridden(row))
       );
-      const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
-      const current = groups.find((g) => g.key === active);
+      const navItem = (g) => {
+        const covered = g.rows.filter(locallyOverridden).length;
+        return h("button", {
+          key: g.key,
+          type: "button",
+          className: "wc-nav-item" + (active === g.key ? " wc-on" : ""),
+          "aria-current": active === g.key ? "true" : undefined,
+          onClick: () => {
+            // 换类别时清掉上一个类别留下的搜索词，避免「切过去一片空白」。
+            set({ activeKind: g.key, query: "" });
+          },
+        },
+          h("span", { className: "wc-nav-name" }, g.title),
+          h("span", { className: "wc-nav-counts" },
+            h("span", { className: "wc-nav-num" }, g.rows.length),
+            covered > 0
+              ? h("span", { className: "wc-nav-badge", title: "在本项目被改过的项数" }, covered)
+              : null
+          )
+        );
+      };
+      // 左侧导航 + 右侧详情：导航常驻，右侧只渲染当前类别。
       return h("div", { className: "wc-body" },
-        h("div", { className: "wc-detail" },
-          h(BulkBar, {
-            rows: current.rows,
-            filtered: visible(current.rows),
-            busy: s.busy === "many",
-          }),
-          h(Section, {
-            title: current.title + "（" + current.rows.length + "）",
-            rows: visible(current.rows),
-            empty: q || only ? "没有匹配的项" : current.empty,
-            compact: false,
-            foldLocked: current.fold,
-            showDesc: s.showDesc,
-          })
+        h("div", { className: "wc-center-layout" },
+          h("nav", { className: "wc-nav", "aria-label": "配置类别" }, groups.map(navItem)),
+          h("div", { className: "wc-detail" },
+            h(Section, {
+              title: current.title + "（" + current.rows.length + "）",
+              rows: visible,
+              empty: q || only ? "没有匹配的项" : current.empty,
+              compact: false,
+              foldLocked: current.fold,
+              showDesc: s.showDesc,
+              action: h(BulkBar, {
+                rows: current.rows,
+                filtered: visible,
+                busy: s.busy === "many",
+              }),
+            })
+          )
         ),
         tip
       );
     }
 
-    const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
-    const current = groups.find((g) => g.key === active);
+    // 页内页签条固定在滚动区外：列表再长也不会把切换器顶走。
+    if (part === "tabs") {
+      return h("div", { className: "wc-tabbar" },
+        h("div", { className: "wc-tabs" },
+          groups.map((g) => h("button", {
+            key: g.key,
+            type: "button",
+            className: "wc-tab" + (active === g.key ? " wc-on" : ""),
+            onClick: () => set({ activeKind: g.key }),
+          }, g.title + "（" + g.rows.length + "）"))
+        )
+      );
+    }
+
     return h("div", { className: "wc-body" },
       h("p", { className: "wc-path", title: data.workspace }, "工作区：" + data.workspace),
-      h("div", { className: "wc-tabs" },
-        groups.map((g) => h("button", {
-          key: g.key,
-          type: "button",
-          className: "wc-tab" + (active === g.key ? " wc-on" : ""),
-          onClick: () => set({ activeKind: g.key }),
-        }, g.title + "（" + g.rows.length + "）"))
-      ),
       h(Section, {
         title: current.title,
         rows: current.rows,
@@ -925,14 +1021,23 @@ export default function activate(ctx) {
   function Panel({ workspacePath }) {
     const s = useStore();
     useAutoClearNote(s.note);
+    const scrollRef = useRef(null);
     useEffect(() => {
       const ws = workspacePath || "";
       set({ ws, data: null, error: "", note: "" });
       if (ws) void refresh(ws);
     }, [workspacePath]);
+    // 切页内页签时回到顶部：换了类别还停在上一类的滚动位置，
+    // 看上去就像「点了没反应」。
+    useEffect(() => {
+      const el = scrollRef.current;
+      if (el && typeof el.scrollTop === "number") el.scrollTop = 0;
+    }, [s.activeKind]);
     return h("div", { className: "wc-root wc-compact" },
       h(Head, { s, onRefresh: () => refresh(workspacePath || s.ws) }),
-      h("div", { className: "wc-scroll" },
+      // 页内页签放在滚动区之外：列表多长都不影响切换。
+      h(Body, { mode: "panel", part: "tabs" }),
+      h("div", { className: "wc-scroll", ref: scrollRef },
         s.data && (s.data.diagnostics || []).length > 0
           ? h("button", {
               type: "button",
@@ -997,15 +1102,17 @@ export default function activate(ctx) {
     }
 
     return h("div", { className: "wc-root wc-center" },
-      h("div", { className: "wc-page-head" },
-        h("div", { className: "wc-page-title" }, "工作区配置"),
-        h("button", {
-          type: "button",
-          className: "wc-refresh",
-          disabled: s.loading,
-          onClick: () => { if (s.ws) void refresh(s.ws); },
-        }, s.loading ? "读取中…" : "刷新")
-      ),
+      s.data
+        ? h(CenterHeader, { data: s.data, s })
+        : h("div", { className: "wc-page-head" },
+            h("div", { className: "wc-page-title" }, "工作区配置"),
+            h("button", {
+              type: "button",
+              className: "wc-refresh",
+              disabled: s.loading,
+              onClick: () => { if (s.ws) void refresh(s.ws); },
+            }, s.loading ? "读取中…" : "刷新")
+          ),
       h("div", { className: "wc-page-fixed" },
         h(Body, { mode: "center", part: "head" })
       ),

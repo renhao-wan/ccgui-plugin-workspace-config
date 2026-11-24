@@ -251,6 +251,13 @@ assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").le
 
 /* ------------------------------------------------------------ UI 渲染 */
 
+// UI 段之前留一条有效覆盖：导航的「覆盖数」徽标需要有真实数据才测得出来。
+// 放在这里而不是 UI 段内部，是因为 Panel 与 Center 共用同一个 store，
+// Center 打开时不会重新扫描，中途改文件不会被看到。
+fs.writeFileSync(localPath, JSON.stringify({
+  enabledPlugins: { "alpha@market": false },
+}, null, 2));
+
 // 真实渲染面板与中央页签：未定义变量、组件调用写错这类问题只有渲染时才暴露。
 // exec 仍然打真实子进程，所以这一段的断言同时覆盖「扫描结果 → 界面」这条链路。
 {
@@ -332,9 +339,38 @@ assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").le
   assert.ok(!/跟随全局/.test(panelText), "团队层有值时仍显示「跟随全局」会误导");
   assert.match(panelText, /诊断/, "右侧面板没有提示诊断入口");
 
+  // 切页签要回到顶部：停在上一类的滚动位置会让人以为「点了没反应」。
+  // 假 React 不绑真实 DOM，只能把 ref.current 换成一个能记 scrollTop 的对象，
+  // 再触发一次依赖变化，验证 effect 真的把它归零。
+  // 必须放在渲染 Center 之前：Center 的 renderFresh 会换掉整组 refs，
+  // Panel 持有的 ref 对象会被作废（这是模拟层限制，不是产品问题）。
+  {
+    const scrollerNow = byClassAll(tree, "wc-scroll")[0];
+    const scrollRefObj = scrollerNow && scrollerNow.props && scrollerNow.props.ref;
+    assert.ok(scrollRefObj && typeof scrollRefObj === "object", "滚动容器没有挂 ref，切页签无法归顶");
+    scrollRefObj.current = { scrollTop: 999 };
+    const tabButtons = byClassAll(tree, "wc-tab");
+    assert.ok(tabButtons.length >= 2, "页内页签数量不足，无法验证切换归顶");
+    tabButtons[1].props.onClick();
+    tree = R.renderKeep(Panel, { workspacePath: ws });
+    const refAfter = byClassAll(tree, "wc-scroll")[0].props.ref;
+    assert.equal(refAfter.current.scrollTop, 0, "切换页内页签后没有回到顶部");
+    assert.ok(byClassAll(tree, "wc-tab").length === 3, "切换页签后页签条不完整");
+  }
+
+
   // 中央页签：先在面板里拿到工作区，再渲染大屏。
+  // 团队层 settings.json 上面已经验过，这里清掉它——否则 scan 会一直报
+  // 「团队配置已禁用」的 warn，「诊断为空时整块不渲染」就没法测。
+  fs.rmSync(path.join(ws, ".claude", "settings.json"), { force: true });
   const Center = registered.center.component;
   let centerTree = R.renderFresh(Center, {}, { effects: true });
+  // Center 打开时 store 里的还是删文件之前的扫描结果，先点一次刷新。
+  const refreshBtn = findAll(centerTree, (n) => {
+    const c = n && n.props && n.props.className;
+    return typeof c === "string" && c.split(/\s+/).includes("wc-refresh");
+  })[0];
+  if (refreshBtn) refreshBtn.props.onClick();
   for (let i = 0; i < 40; i++) {
     const picks = byClassAll(centerTree, "wc-pick");
     if (picks.length > 0) {
@@ -342,15 +378,71 @@ assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").le
       centerTree = R.renderKeep(Center, {});
       continue;
     }
-    if (byClassAll(centerTree, "wc-nav-item").length > 0) break;
+    // 顶部区默认收起，诊断块本来就不渲染，所以不能靠 wc-diag 判断扫描是否落地。
+    // 收起态的概览 chips 会在有诊断时显示「诊断 N」，用它作为统一判据。
+    if (byClassAll(centerTree, "wc-center-layout").length > 0
+      && !/诊断/.test(textOf(centerTree))) break;
     await new Promise((r) => setTimeout(r, 50));
     centerTree = R.renderKeep(Center, {});
   }
   const centerText = textOf(centerTree);
-  assert.ok(byClassAll(centerTree, "wc-nav-item").length === 3, "中央页签没有渲染出三个类别导航");
+  // 左导航 + 右详情：一次只渲染一类，不会三块列表同时出现。
+  assert.equal(byClassAll(centerTree, "wc-center-layout").length, 1, "中央页签没有左导航布局");
+  assert.equal(byClassAll(centerTree, "wc-nav").length, 1, "中央页签没有左侧导航");
+  assert.equal(byClassAll(centerTree, "wc-nav-item").length, 3, "左侧导航应有三个类别");
+  assert.equal(byClassAll(centerTree, "wc-detail").length, 1, "中央页签没有右侧详情区");
+  assert.equal(byClassAll(centerTree, "wc-col").length, 0, "三列布局应已移除");
+  assert.equal(byClassAll(centerTree, "wc-grid").length, 0, "三列网格应已移除");
+  // 详情区里只该有当前类别的 Section
+  const detail = byClassAll(centerTree, "wc-detail")[0];
+  assert.equal(findAll(detail, (n) => {
+    const c = n && n.props && n.props.className;
+    return typeof c === "string" && c.split(/\s+/).includes("wc-sec");
+  }).length, 1, "右侧详情区应只渲染当前类别一个分组");
+  // 导航项带数量；有本地覆盖时还要带覆盖数徽标
+  const navText = textOf(byClassAll(centerTree, "wc-nav")[0]);
+  assert.match(navText, /插件/, "导航缺少插件项");
+  assert.match(navText, /MCP/, "导航缺少 MCP 项");
+  assert.match(navText, /技能/, "导航缺少技能项");
+  assert.equal(byClassAll(centerTree, "wc-nav-num").length, 3, "三个导航项都要有数量");
+  assert.ok(byClassAll(centerTree, "wc-nav-badge").length >= 1, "有本地覆盖时导航应显示覆盖数徽标");
   assert.ok(!centerText.includes("undefined"), "中央页签文案里出现了 undefined");
-  // 团队层禁用了 proj-one，诊断区应当出现
-  assert.match(centerText, /诊断/, "中央页签没有渲染出诊断区");
+  // 诊断为空时，文案里也不该出现「诊断」。
+  assert.ok(!/诊断/.test(centerText), "没有诊断项时不该出现诊断字样");
+  // 默认收起：列表优先，首屏只有一条带概览 chips 的标题行，
+  // 统计卡片与搜索框都不渲染，想筛选再点开。
+  assert.equal(byClassAll(centerTree, "wc-stats").length, 0, "默认应处于收起态，不该显示统计卡片");
+  assert.equal(byClassAll(centerTree, "wc-search").length, 0, "默认收起时不该有搜索框");
+  assert.equal(byClassAll(centerTree, "wc-page-head").length, 1, "收起态仍要保留标题栏");
+  assert.ok(
+    byClassAll(centerTree, "wc-page-head")[0].props.className.includes("wc-head-collapsed"),
+    "默认应带收起态样式",
+  );
+  const defaultChips = textOf(byClassAll(centerTree, "wc-head-chips")[0] || "");
+  assert.match(defaultChips, /插件/, "默认收起态 chips 缺少插件数量");
+  assert.match(defaultChips, /覆盖/, "默认收起态 chips 缺少覆盖数");
+  // 展开后才做搜索与切类别相关断言
+  byClassAll(centerTree, "wc-icon-btn")[0].props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-stats").length, 1, "点开收起按钮后应显示统计卡片");
+  // 切类别：右侧详情跟着换，搜索词被清空
+  const navItems = byClassAll(centerTree, "wc-nav-item");
+  const skillIdx = navItems.findIndex((n) => textOf(n).includes("技能"));
+  assert.ok(skillIdx >= 0, "导航里找不到技能项");
+  navItems[skillIdx].props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  const detailAfter = byClassAll(centerTree, "wc-detail")[0];
+  assert.match(textOf(detailAfter), /技能/, "切到技能后右侧详情没有换类别");
+  assert.ok(
+    byClassAll(centerTree, "wc-nav-item")[skillIdx].props.className.includes("wc-on"),
+    "切换后导航项没有高亮",
+  );
+  const searchAfter = findAll(centerTree, (n) => {
+    const c = n && n.props && n.props.className;
+    return typeof c === "string" && c.split(/\s+/).includes("wc-search");
+  })[0];
+  assert.equal(searchAfter.props.value, "", "切类别后搜索词应清空");
+  assert.match(String(searchAfter.props.placeholder), /技能/, "搜索框占位应显示当前类别");
   // 点行展开生效链路：全局 → 团队配置 → 本地 → 最终
   const mains = byClassAll(centerTree, "wc-main");
   assert.ok(mains.length > 0, "中央页签没有渲染出资源行");
@@ -358,6 +450,46 @@ assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").le
   centerTree = R.renderKeep(Center, {});
   assert.ok(byClassAll(centerTree, "wc-flow").length > 0, "点击行没有展开生效链路");
   assert.match(textOf(centerTree), /团队配置/, "生效链路里没有团队配置这一层");
+
+  // 诊断一切正常时整块不该出现：占一行只会挤列表。
+  // 这一段的 fixture 覆盖都是有效的（alpha@market 仍存在），所以 diagnostics 为空。
+  assert.equal(byClassAll(centerTree, "wc-diag").length, 0, "没有诊断项时不该渲染诊断块");
+
+  // 顶部区可收起：收起后统计/搜索/诊断全消失，只剩一条带概览 chips 的紧凑条；
+  // 再点一次能展开回来。状态经 saveSettings 落 storage，跨会话保持。
+  assert.equal(byClassAll(centerTree, "wc-stats").length, 1, "这之前应处于展开态");
+  const headToggle = byClassAll(centerTree, "wc-icon-btn")[0];
+  assert.ok(headToggle, "顶部区没有收起按钮");
+  headToggle.props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-stats").length, 0, "收起后不该再有统计卡片");
+  assert.equal(byClassAll(centerTree, "wc-search").length, 0, "收起后不该再有搜索框");
+  assert.equal(byClassAll(centerTree, "wc-page-head").length, 1, "收起后仍要保留标题栏");
+  assert.ok(
+    byClassAll(centerTree, "wc-page-head")[0].props.className.includes("wc-head-collapsed"),
+    "收起后标题栏应带上收起态样式",
+  );
+  const chips = textOf(byClassAll(centerTree, "wc-head-chips")[0] || "");
+  assert.match(chips, /插件/, "收起态概览 chips 缺少插件数量");
+  assert.match(chips, /技能/, "收起态概览 chips 缺少技能数量");
+  assert.match(chips, /覆盖/, "有本地覆盖时收起态应显示覆盖数");
+  assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.headCollapsed, true, "收起状态没有持久化");
+  // 收起后列表照常可用
+  assert.ok(byClassAll(centerTree, "wc-nav-item").length === 3, "收起后左侧导航应完整保留");
+  assert.ok(byClassAll(centerTree, "wc-row").length > 0, "收起后列表应照常渲染");
+  byClassAll(centerTree, "wc-icon-btn")[0].props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-stats").length, 1, "再次点击应展开回统计区");
+
+  // 侧栏：页内页签固定在滚动区外，列表再长也不会把它顶走
+  const scroller = byClassAll(tree, "wc-scroll")[0];
+  assert.ok(scroller, "右侧面板没有滚动容器");
+  const tabsInScroll = findAll(scroller, (n) => {
+    const c = n && n.props && n.props.className;
+    return typeof c === "string" && c.split(/\s+/).includes("wc-tabs");
+  });
+  assert.equal(tabsInScroll.length, 0, "页内页签还在滚动容器里，会和列表一起滚走");
+  assert.ok(byClassAll(tree, "wc-tab").length === 3, "右侧面板没有渲染出三个页内页签");
 
   // 设置页：勾选后应写入 storage；下方还要渲染出反馈区。
   const Settings = registered.settings.component;
@@ -374,5 +506,5 @@ assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").le
   console.log("UI_OK panel/center/settings 渲染通过");
 }
 
-console.log("SMOKE_OK checks=74");
+console.log("SMOKE_OK checks=111");
 console.log("main.js", fs.statSync(MAIN).size, "bytes; manifest", MANIFEST.id);

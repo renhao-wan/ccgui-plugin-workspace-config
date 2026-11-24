@@ -107,8 +107,8 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 
 ## 6. UI
 
-- **右侧 panel tab**：跟随 `workspacePath`，紧凑列表 + 三态分段控件
-- **中央 center tab**：同一 store 的宽视图，需先在右侧面板激活一次工作区
+- **右侧 panel tab**：跟随 `workspacePath`，紧凑列表 + 三态分段控件；三个类别用页内页签切换，页签条固定在滚动区外（列表再长也不会把切换器顶走）
+- **中央 center tab**：同一 store 的宽视图，**左侧导航 + 右侧详情**——一次只看一类（插件 / MCP / 技能），不会再有三块列表同时出现；左导航每项带总数，有本地覆盖时追加覆盖数徽标；搜索与「只看本地覆盖」只作用于当前类别，切类别会清空搜索词；窄屏（<880px）导航翻到顶部变成横向滚动条。需先在右侧面板激活一次工作区
 - 每行显示：名称、来源元信息（市场 / scope / personal|project|plugin）、三态控件
 - plugin 技能行显示「由插件控制」徽标
 - 保存后提示生效方式：插件 `/reload-plugins`，MCP 与技能新会话
@@ -129,6 +129,8 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 ### 6.2 诊断
 
 `scan` 额外返回 `diagnostics`，每项 `{ level, kind, id, name, message, fixable }`：
+
+诊断为空时整块不渲染——没有问题时不该占正文一行。
 
 | level | 场景 | 可清理 |
 |---|---|---|
@@ -159,4 +161,4 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 ## 8. 测试
 
 - 11 条纯逻辑单测：三态读写、空键清理、保留非托管键、生效态
-- 25 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改
+- 111 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开
