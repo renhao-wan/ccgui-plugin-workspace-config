@@ -1535,13 +1535,15 @@ const STYLE = `
 .wc-btn.wc-on { background: rgba(79,140,255,.16); font-weight: 600; }
 .wc-btn:disabled { opacity: .38; cursor: default; }
 /* 侧栏窄：技能四态改成下拉，省下的宽度全给名字 */
-.wc-select-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.wc-select-wrap { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .wc-select { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
 .wc-select:disabled { opacity: .38; cursor: default; }
 .wc-select-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-select-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
 .wc-select-caret.wc-up { transform: rotate(180deg); }
-.wc-menu { display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--color-background-primary-default, #232326); border: 1px solid rgba(127,127,127,.2); }
+/* 菜单必须是浮层（绝对定位）：行内展开会撑高这一行，整块列表跟着跳动。 */
+.wc-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; min-width: 112px; display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--color-background-primary-default, #232326); border: 1px solid rgba(127,127,127,.2); }
+.wc-menu.wc-menu-up { top: auto; bottom: calc(100% + 4px); }
 .wc-menu-item { font: inherit; font-size: 11.5px; text-align: left; padding: 4px 9px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
 .wc-menu-item:hover { background: rgba(127,127,127,.16); }
 .wc-menu-item.wc-on { font-weight: 600; background: rgba(127,127,127,.12); }
@@ -2214,12 +2216,46 @@ export default function activate(ctx) {
   /**
    * 侧栏用的自绘下拉。
    * 不用 <select>：Windows 下它会渲染成系统原生控件，和宿主界面完全不是一套外观。
-   * 展开的菜单是行内展开而不是浮层，滚动容器不会把它裁掉。
+   * 菜单是绝对定位浮层，不占文档流——行内展开会把这一行撑高，整块列表跟着跳。
+   * 用 absolute 而不是 fixed：滚动的容器会跟随，菜单不会飘在半空，
+   * 也绕开了 fixed 在带 transform 的祖先里会错位的问题。
    */
   function SkillSelect({ opts, current, disabledFor, busy, title, onPick }) {
     const [open, setOpen] = useState(false);
+    const [up, setUp] = useState(false);
+    const wrapRef = useRef(null);
     const currentLabel = (opts.find(([, value]) => value === current) || opts[0] || [""])[0];
-    return h("div", { className: "wc-select-wrap" },
+
+    // 菜单挂在按钮所在的 wrap 里，点到别处就收起来。
+    // 测试替身没有真实 DOM（ref.current 为空），直接跳过。
+    useEffect(() => {
+      if (!open) return;
+      const wrap = wrapRef.current;
+      if (!wrap || typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+      const onDown = (ev) => {
+        if (wrap.contains && ev && wrap.contains(ev.target)) return;
+        setOpen(false);
+      };
+      document.addEventListener("mousedown", onDown);
+      return () => { document.removeEventListener("mousedown", onDown); };
+    }, [open]);
+
+    function toggle(ev) {
+      if (open) { setOpen(false); return; }
+      // 下方放不下就向上翻，否则最后一行展开会被滚动容器裁掉一截。
+      const el = ev && ev.currentTarget;
+      if (el && typeof el.getBoundingClientRect === "function" && typeof window !== "undefined") {
+        const r = el.getBoundingClientRect();
+        const vh = window.innerHeight || 0;
+        const needed = opts.length * 26 + 14;
+        setUp(vh > 0 && r.bottom + needed > vh - 8);
+      } else {
+        setUp(false);
+      }
+      setOpen(true);
+    }
+
+    return h("div", { className: "wc-select-wrap", ref: wrapRef },
       h("button", {
         type: "button",
         className: "wc-select" + (busy ? " wc-busy" : "") + (open ? " wc-open" : ""),
@@ -2227,13 +2263,13 @@ export default function activate(ctx) {
         title,
         "aria-haspopup": "listbox",
         "aria-expanded": open ? "true" : "false",
-        onClick: () => setOpen(!open),
+        onClick: toggle,
       },
         h("span", { className: "wc-select-label" }, currentLabel),
         h("span", { className: "wc-select-caret" + (open ? " wc-up" : "") })
       ),
       open
-        ? h("div", { className: "wc-menu", role: "listbox" },
+        ? h("div", { className: "wc-menu" + (up ? " wc-menu-up" : ""), role: "listbox" },
             opts.map(([label, value]) => h("button", {
               key: value,
               type: "button",

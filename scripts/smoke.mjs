@@ -780,6 +780,17 @@ fs.writeFileSync(localPath, JSON.stringify({
     const rowOpen = byClassAll(tree, "wc-row").find((n) => textOf(n).includes("project-skill"));
     const menuItems = byClassAll(rowOpen, "wc-menu-item");
     assert.equal(menuItems.length, 5, "自绘下拉展开后应有五档");
+    // 菜单必须是浮层：行内展开会撑高这一行，整块列表跟着跳（用户反馈过）。
+    const menuRule = (capturedCss.match(/\.wc-menu\s*\{[^}]*\}/) || [""])[0];
+    assert.ok(menuRule, "样式里找不到 .wc-menu");
+    assert.match(menuRule, /position:\s*absolute/, "下拉菜单必须是浮层，不能占文档流");
+    assert.equal(/position:\s*(static|relative)/.test(menuRule), false, "菜单不能参与行内布局");
+    const wrapRule = (capturedCss.match(/\.wc-select-wrap\s*\{[^}]*\}/) || [""])[0];
+    assert.match(wrapRule, /position:\s*relative/, "浮层要相对下拉按钮定位");
+    assert.match(capturedCss, /\.wc-menu\.wc-menu-up\s*\{[^}]*bottom:\s*calc\(100% \+ 4px\)/,
+      "缺少向上翻转的规则：最后一行的菜单会被滚动容器裁掉");
+    assert.equal(byClassAll(rowOpen, "wc-menu-up").length, 0,
+      "拿不到按钮坐标时应默认向下展开");
     const currentItem = menuItems.find((n) => String(n.props.className || "").split(/\s+/).includes("wc-on"));
     assert.ok(currentItem, "下拉里当前档位没有高亮");
     assert.equal(textOf(currentItem), "仅名称", "高亮的应是当前值 name-only");
