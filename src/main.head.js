@@ -218,6 +218,7 @@ const STYLE = `
 .wc-diag-msg { opacity: .65; }
 .wc-diag-info { opacity: .75; }
 .wc-diag-stale .wc-diag-msg { color: #c92a2a; opacity: .85; }
+.wc-diag-error .wc-diag-msg { color: #c92a2a; opacity: .9; }
 .wc-diag-mini { width: 100%; box-sizing: border-box; text-align: left; font: inherit; font-size: 11.5px; margin: 0 0 10px; padding: 7px 10px; border: 1px solid rgba(217,83,79,.28); border-radius: 8px; background: rgba(217,83,79,.05); color: inherit; cursor: pointer; }
 .wc-diag-mini:hover { background: rgba(217,83,79,.09); }
 
@@ -592,7 +593,9 @@ export default function activate(ctx) {
       ? "插件 " + (row.plugin || "")
       : row.source === "personal" ? "个人" : "项目";
     const g = row.globalState === "off" ? "全局禁用" : "全局可用";
-    return ["技能", src, g, team, row.shadowed ? "同名个人版优先" : ""].filter(Boolean).join(" · ");
+    // 目录名和技能名不一致时点出来：用户按名字找不到对应目录会以为面板写错了。
+    const dir = row.dirName && row.dirName !== row.name ? "目录 " + row.dirName : "";
+    return ["技能", src, g, team, dir, row.shadowed ? "同名个人版优先" : ""].filter(Boolean).join(" · ");
   }
 
   // 技能的取值有四种（on / name-only / user-invocable-only / off），

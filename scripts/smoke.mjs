@@ -34,11 +34,18 @@ const pluginDir = path.join(claude, "plugins", "cache", "market", "alpha", "1.0.
 
 fs.mkdirSync(path.join(claude, "skills", "personal-skill"), { recursive: true });
 fs.mkdirSync(path.join(ws, ".claude", "skills", "project-skill"), { recursive: true });
+// 目录名与 frontmatter 的 name 故意不一致：技能名以 frontmatter 为准，
+// 目录名只是回落。用目录名当键写 skillOverrides，Claude Code 不会认。
+fs.mkdirSync(path.join(ws, ".claude", "skills", "dir-name-mismatch"), { recursive: true });
 fs.mkdirSync(path.join(pluginDir, "skills", "alpha-skill"), { recursive: true });
 fs.mkdirSync(path.join(claude, "plugins"), { recursive: true });
 
 fs.writeFileSync(path.join(claude, "skills", "personal-skill", "SKILL.md"), "---\nname: personal-skill\n---\n");
 fs.writeFileSync(path.join(ws, ".claude", "skills", "project-skill", "SKILL.md"), "---\nname: project-skill\n---\n");
+fs.writeFileSync(
+  path.join(ws, ".claude", "skills", "dir-name-mismatch", "SKILL.md"),
+  "---\nname: real-skill-name\ndescription: 目录名与 name 不一致\n---\n",
+);
 fs.writeFileSync(path.join(pluginDir, "skills", "alpha-skill", "SKILL.md"), "---\nname: alpha-skill\n---\n");
 
 const globalSettings = {
@@ -80,7 +87,10 @@ const scanSource = JSON.parse(rest.slice(0, end));
 const script = path.join(tmp, "config-io.mjs");
 fs.writeFileSync(script, scanSource);
 
+// 冒烟全程只碰临时 HOME。如果外层 shell 设了 CLAUDE_CONFIG_DIR，
+// 脚本会去读真实配置目录——这里必须清掉，后面单独造一个 fixture 测它。
 const env = Object.assign({}, process.env, { USERPROFILE: home, HOME: home });
+delete env.CLAUDE_CONFIG_DIR;
 const run = (args) => {
   const out = execFileSync(process.execPath, [script, ...args], { env, encoding: "utf8" });
   return JSON.parse(out);
@@ -129,6 +139,10 @@ assert.equal(skillByName("project-skill").source, "project");
 assert.equal(skillByName("alpha-skill").source, "plugin");
 assert.equal(skillByName("alpha-skill").controllable, false);
 assert.equal(skillByName("alpha-skill").plugin, "alpha");
+// 技能名取 frontmatter 的 name，目录名只作展示与回落。
+assert.ok(skills.some((s) => s.name === "real-skill-name"), "技能名应取 frontmatter 的 name");
+assert.equal(skills.some((s) => s.name === "dir-name-mismatch"), false, "目录名不该当技能名");
+assert.equal(skillByName("real-skill-name").dirName, "dir-name-mismatch", "行里要带上目录名以便定位");
 
 /* ------------------------------------------------------------ set */
 
@@ -256,6 +270,112 @@ assert.equal(
   "单个审批不能顺带改总开关",
 );
 fs.writeFileSync(localPath, "{}");
+
+/* ------------------------------------------------------------ 坏文件与审批残留 */
+
+// 项目的 settings.local.json 里住着用户手写的 permissions / hooks / env。
+// 解析失败时绝不能当成空对象写回，否则点一下开关就把整份配置清空。
+{
+  const brokenPath = path.join(tmp, "broken-ws");
+  fs.mkdirSync(path.join(brokenPath, ".claude"), { recursive: true });
+  const brokenBody = '{\n  "permissions": { "allow": ["Bash(ls)"] },\n}\n';
+  fs.writeFileSync(path.join(brokenPath, ".claude", "settings.local.json"), brokenBody);
+
+  const brokenScan = run(["scan", brokenPath]);
+  const fileDiag = brokenScan.diagnostics.find((d) => d.kind === "file");
+  assert.equal(fileDiag.level, "error", "坏掉的配置文件必须报 error");
+  assert.equal(fileDiag.fixable, false, "坏文件不能靠一键清理解决");
+  assert.match(fileDiag.message, /JSON/);
+
+  const brokenSet = runSoft(["set", brokenPath, "skill", "x", "off"]);
+  assert.equal(brokenSet.ok, false, "配置不是合法 JSON 时必须拒绝写入");
+  assert.match(String(brokenSet.error), /避免覆盖/);
+  assert.equal(
+    fs.readFileSync(path.join(brokenPath, ".claude", "settings.local.json"), "utf8"),
+    brokenBody,
+    "拒绝写入后原文件必须一字不改",
+  );
+
+  // 空文件视作「还没配置」：可以正常写，不算坏文件。
+  const emptyWs = path.join(tmp, "empty-ws");
+  fs.mkdirSync(path.join(emptyWs, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(emptyWs, ".claude", "settings.local.json"), "  \n");
+  assert.equal(run(["scan", emptyWs]).diagnostics.some((d) => d.kind === "file"), false, "空文件不该算坏文件");
+  assert.equal(run(["set", emptyWs, "skill", "x", "off"]).ok, true, "空文件应能正常写入");
+}
+
+// CLAUDE_CONFIG_DIR 一旦设置，Claude Code 会把 settings.json / .claude.json /
+// plugins / projects 全搬过去。插件必须跟着走，否则会读成「什么都没配」。
+{
+  const cfgDir = path.join(tmp, "custom-config");
+  const cfgHome = path.join(tmp, "custom-home");
+  fs.mkdirSync(path.join(cfgDir, "plugins", "cache", "m", "p", "1.0.0"), { recursive: true });
+  fs.mkdirSync(path.join(cfgDir, "skills", "cfg-skill"), { recursive: true });
+  fs.mkdirSync(cfgHome, { recursive: true });
+  fs.writeFileSync(
+    path.join(cfgDir, "settings.json"),
+    JSON.stringify({ enabledPlugins: { "cfg@m": true }, skillOverrides: { "cfg-skill": "name-only" } }),
+  );
+  fs.writeFileSync(
+    path.join(cfgDir, ".claude.json"),
+    JSON.stringify({ mcpServers: { "cfg-mcp": { command: "x" } } }),
+  );
+  fs.writeFileSync(path.join(cfgDir, "skills", "cfg-skill", "SKILL.md"), "---\nname: cfg-skill\n---\n");
+  const cfgWs = path.join(tmp, "cfg-ws");
+  fs.mkdirSync(cfgWs, { recursive: true });
+
+  const cfgEnv = Object.assign({}, env, { CLAUDE_CONFIG_DIR: cfgDir });
+  const cfgScan = JSON.parse(execFileSync(process.execPath, [script, "scan", cfgWs], {
+    env: cfgEnv, encoding: "utf8",
+  }));
+  assert.ok(cfgScan.mcp.some((r) => r.id === "cfg-mcp"), "CLAUDE_CONFIG_DIR 下的 MCP 应该被读到");
+  assert.ok(cfgScan.plugins.some((r) => r.id === "cfg@m"), "CLAUDE_CONFIG_DIR 下的插件应该被读到");
+  const cfgSkill = cfgScan.skills.find((r) => r.name === "cfg-skill");
+  assert.equal(cfgSkill.globalState, "name-only", "CLAUDE_CONFIG_DIR 下的 skillOverrides 应该按四态读出");
+
+  // 记忆浏览同样要跟着走：全局 CLAUDE.md 与自动记忆目录都在 CONFIG_DIR 里。
+  fs.writeFileSync(path.join(cfgDir, "CLAUDE.md"), "# 自定义目录的全局说明\n");
+  const cfgMem = JSON.parse(execFileSync(process.execPath, [script, "memory", cfgWs], {
+    env: cfgEnv, encoding: "utf8",
+  }));
+  assert.ok(cfgMem.files.some((f) => f.source === "user"), "CLAUDE_CONFIG_DIR 下的全局 CLAUDE.md 应被列出");
+  assert.equal(cfgMem.slug, cfgWs.replace(/[^a-zA-Z0-9]/g, "-"));
+}
+
+// 审批名单同样会留残留：.mcp.json 里删掉的 server 还占着名单，
+// 重装同名 server 时会突然被自动批准/拒绝。这类项必须能被诊断出来并清掉。
+{
+  const staleWs = path.join(tmp, "stale-approval-ws");
+  fs.mkdirSync(path.join(staleWs, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(staleWs, ".mcp.json"), JSON.stringify({
+    mcpServers: { present: { command: "x" } },
+  }));
+  const stalePath = path.join(staleWs, ".claude", "settings.local.json");
+  fs.writeFileSync(stalePath, JSON.stringify({
+    enabledMcpjsonServers: ["ghost-a", "present"],
+    disabledMcpjsonServers: ["ghost-b"],
+  }));
+
+  const staleScan = run(["scan", staleWs]);
+  const staleRows = staleScan.diagnostics.filter((d) => d.kind === "mcpApproval");
+  assert.equal(staleRows.length, 2, "两个残留的审批记录都要被识别");
+  assert.ok(staleRows.every((d) => d.level === "stale" && d.fixable), "审批残留应可清理");
+  assert.deepEqual(staleRows.map((d) => d.id).sort(), ["ghost-a", "ghost-b"]);
+  assert.equal(
+    staleScan.diagnostics.some((d) => d.kind === "mcpApproval" && d.id === "present"),
+    false,
+    "仍存在的 server 不该被当成残留",
+  );
+
+  // 清理走的是诊断区统一的 inherit → 对审批等价于「回到待审批」。
+  run(["setMany", staleWs, JSON.stringify(
+    staleRows.map((d) => ({ kind: d.kind, id: d.id, state: "inherit" })),
+  )]);
+  const afterStale = JSON.parse(fs.readFileSync(stalePath, "utf8"));
+  assert.deepEqual(afterStale.enabledMcpjsonServers, ["present"], "只清残留，保留仍有效的批准");
+  assert.equal("disabledMcpjsonServers" in afterStale, false, "清空后不留空数组");
+  assert.equal(run(["scan", staleWs]).diagnostics.filter((d) => d.kind === "mcpApproval").length, 0);
+}
 
 /* ------------------------------------------------------------ 团队层 */
 
@@ -598,6 +718,11 @@ fs.writeFileSync(localPath, JSON.stringify({
     assert.ok(!enableBtn.props.className.includes("wc-on"), "name-only 不该被显示成启用");
     const dot = byClassAll(skillRow, "wc-dot")[0];
     assert.ok(dot.props.title.includes("仅名称"), "圆点说明应反映 name-only");
+    // 真实渲染一遍：目录名与技能名不一致时，meta 里要能看到目录名。
+    const mismatchRow = byClassAll(detailAfter, "wc-row").find((n) => textOf(n).includes("real-skill-name"));
+    assert.ok(mismatchRow, "技能列表缺少 frontmatter 命名的技能");
+    assert.match(textOf(mismatchRow), /目录 dir-name-mismatch/, "目录名与技能名不一致时要在行里标出目录名");
+    assert.ok(!textOf(detailAfter).includes("undefined"), "技能列表文案里出现了 undefined");
   }
   // .mcp.json 审批：MCP 行要出现审批控件，已批准时显示「已批准」。
   {

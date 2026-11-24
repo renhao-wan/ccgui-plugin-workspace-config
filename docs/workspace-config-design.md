@@ -54,6 +54,7 @@ Claude Code 本身有项目级覆盖机制，但散落在三个键、三套语�
 - personal / project 技能：`inherit` + 四态共五档
 - **plugin 提供的技能不受 `skillOverrides` 控制**（官方文档明确），只能关闭整个插件
 - 同名技能：`enterprise > personal > project`，个人版压过项目版；`skillOverrides` 按名字生效，不区分来源
+- **技能名取 `SKILL.md` frontmatter 的 `name`，目录名只是回落**（官方文档）。两条不一致时若用目录名写入 `skillOverrides`，键会对不上 Claude Code 认的名字，开关看着生效、实际无效；因此行内 meta 同时标出目录名
 - 读不认识的取值时返回 `unknown`，界面只显示「其它取值」、不渲染按钮——把它猜成 `on` 会误导，而任何一次写入都会覆盖掉用户原值
 
 因此技能栏按来源分流：
@@ -121,7 +122,17 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 - 全局状态只用于展示，不参与写入决策
 - 审批与禁用分开存储、分开写入：`mcpApproval` 是一个独立的写操作，不碰 `deniedMcpServers`
 
+### 4.1 写入前的安全检查
+
+`settings.local.json` 里可能同时住着用户手写的 `permissions` / `hooks` / `env`。因此写路径与读路径分开：
+
+- 读（`scan`）：解析失败时报 `error` 级诊断，**不**当成「没有配置」——后者会让界面显示成全部跟随全局，用户点一下就覆盖了原文件
+- 写（`set` / `setMany`）：用 `readForWrite` 严格读取，文件不是合法 JSON 就直接抛错停止。空文件与不存在视为「还没配置」，照常写入
+- 顶层不是对象（数组 / 字符串）同样拒绝
+
 ## 5. 读取范围
+
+全局路径不是写死的：设了 `CLAUDE_CONFIG_DIR` 后，Claude Code 会把 `settings.json`、`.claude.json`、`plugins/`、`projects/` 全搬进该目录，插件跟着走（`CLAUDE_DIR = $CLAUDE_CONFIG_DIR`）。未设时 `CLAUDE_DIR = ~/.claude`，而 `~/.claude.json` 仍留在 HOME 根上。
 
 | 文件/目录 | 用途 |
 |---|---|
@@ -165,11 +176,12 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 
 | level | 场景 | 可清理 |
 |---|---|---|
-| `stale` | local 里有键，但对应插件 / 技能 / MCP 已不存在 | 是 |
+| `error` | `settings.local.json` 不是合法 JSON，面板拒绝写入 | 否 |
+| `stale` | local 里有键，但对应插件 / 技能 / MCP 已不存在；`.mcp.json` 里已没有的 server 仍留在审批名单里 | 是 |
 | `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖；项目 `.mcp.json` 的 server 待审批 | 否 |
 | `info` | 项目技能被同名个人技能遮蔽 | 否 |
 
-残留项之所以必须由诊断区处理：列表只列现存资源，这些键不在任何列表里，用户没有其他入口。清理复用 `setMany` 的 `inherit` 操作，不新增写命令。
+残留项之所以必须由诊断区处理：列表只列现存资源，这些键不在任何列表里，用户没有其他入口。清理复用 `setMany` 的 `inherit` 操作，不新增写命令；审批类型在写入层把 `inherit` 翻译成 `pending`，等价于「把这一条从两个名单里删掉」。
 
 ### 6.3 生效链路
 
@@ -216,4 +228,4 @@ node config-io.mjs memoryRead <workspace> <path> 读正文
 ## 8. 测试
 
 - 17 条纯逻辑单测：三态读写、技能四态往返与 `unknown` 只读、`.mcp.json` 审批（拒绝优先、名单互斥、总开关语义）、空键清理、保留非托管键、生效态
-- 206 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写
+- 206 项冒烟检查（当前 232 项）：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；另含坏 JSON 文件拒绝写入、审批名单残留可清理、`CLAUDE_CONFIG_DIR` 生效、frontmatter `name` 覆盖目录名四组用例；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写

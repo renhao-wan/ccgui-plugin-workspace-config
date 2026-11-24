@@ -29,8 +29,17 @@ import {
 } from "../src/lib/model.mjs";
 
 const HOME = process.env.USERPROFILE || process.env.HOME || os.homedir();
-const CLAUDE_DIR = path.join(HOME, ".claude");
-const CLAUDE_JSON = path.join(HOME, ".claude.json");
+// 设了 CLAUDE_CONFIG_DIR 时，Claude Code 会把 settings.json、.claude.json、
+// plugins/、projects/ 全部搬进这个目录（官方文档：该页所有 ~/.claude 路径都改到这里）。
+// 硬编码 ~/.claude 会读到一片空，面板显示成「什么都没配」。实测 2.1.319 确实如此。
+// 注意 .claude.json 只在设了这个变量时才跟着走，默认仍在 HOME 根上。
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(HOME, ".claude");
+const CLAUDE_DIR = CONFIG_DIR;
+const CLAUDE_JSON = process.env.CLAUDE_CONFIG_DIR
+  ? path.join(CONFIG_DIR, ".claude.json")
+  : path.join(HOME, ".claude.json");
 
 function readJson(file) {
   try {
@@ -40,6 +49,44 @@ function readJson(file) {
   } catch {
     return null;
   }
+}
+
+/**
+ * 严格读取：把「文件不存在」和「存在但解析失败」分开。
+ *
+ * 写入前必须用这个。settings.local.json 里可能同时住着用户手写的 permissions、
+ * hooks、env 等键；一旦解析失败就被当成空对象写回，等于整份配置被清空。
+ * 这种情况要么报错停止，要么提示用户自己修，绝不能静默覆盖。
+ */
+function readJsonStrict(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { value: null, error: null };
+    return { value: null, error: "读取失败：" + ((err && err.message) || err) };
+  }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  // 空文件按「还没配置」处理，写回时自然变成一份新配置。
+  if (!text.trim()) return { value: null, error: null };
+  try {
+    const value = JSON.parse(text);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return { value: null, error: "顶层不是 JSON 对象" };
+    }
+    return { value, error: null };
+  } catch (err) {
+    return { value: null, error: String((err && err.message) || err) };
+  }
+}
+
+/** 写之前读；文件坏了就抛错，宁可这次操作失败也不吞掉用户的其它配置。 */
+function readForWrite(file) {
+  const { value, error } = readJsonStrict(file);
+  if (error) {
+    throw new Error("项目配置不是合法 JSON，为避免覆盖已停止写入：" + file + "（" + error + "）");
+  }
+  return value || {};
 }
 
 function writeJsonAtomic(file, data) {
@@ -71,7 +118,18 @@ function listSkillDirs(root, source, plugin) {
     if (!entry.isDirectory()) continue;
     const md = path.join(root, entry.name, "SKILL.md");
     if (!fs.existsSync(md)) continue;
-    out.push({ name: entry.name, source, plugin: plugin || null, path: md, description: readSkillDescription(md) });
+    const meta = readSkillMeta(md);
+    // 技能名优先取 frontmatter 的 name，目录名只是回落（官方文档明确）。
+    // 用目录名当键时，一旦两者不一致，写进 skillOverrides 的键就对不上
+    // Claude Code 认的那个名字，开关看起来生效、实际什么也没改。
+    out.push({
+      name: meta.name || entry.name,
+      dirName: entry.name,
+      source,
+      plugin: plugin || null,
+      path: md,
+      description: meta.description,
+    });
   }
   return out;
 }
@@ -118,30 +176,37 @@ function pluginDescription(dir) {
   return "";
 }
 
-/** SKILL.md frontmatter 里的 description；只读前 50 行。 */
-function readSkillDescription(file) {
+/** SKILL.md frontmatter 里的 name 与 description；只读前 50 行。 */
+function readSkillMeta(file) {
+  const meta = { name: "", description: "" };
   try {
     const lines = fs.readFileSync(file, "utf8").split(/\r?\n/).slice(0, 50);
-    if (!lines.length || lines[0].trim() !== "---") return "";
+    if (!lines.length || lines[0].trim() !== "---") return meta;
     let collecting = false;
     const block = [];
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       if (line.trim() === "---") break;
+      if (collecting) {
+        if (/^\s+\S/.test(line)) { block.push(line.trim()); continue; }
+        collecting = false;
+      }
+      const nameMatch = /^name:\s*(.*)$/.exec(line);
+      if (nameMatch && !meta.name) {
+        meta.name = nameMatch[1].replace(/^["']|["']$/g, "").trim();
+        continue;
+      }
       const match = /^description:\s*(.*)$/.exec(line);
       if (match) {
         const value = match[1].trim();
         if (/^[|>][-+]?$/.test(value)) { collecting = true; continue; }
-        return value.replace(/^["']|["']$/g, "").trim();
-      }
-      if (collecting) {
-        if (/^\s+\S/.test(line)) block.push(line.trim());
-        else break;
+        meta.description = value.replace(/^["']|["']$/g, "").trim();
       }
     }
-    return block.join(" ").trim();
+    if (collecting || block.length) meta.description = meta.description || block.join(" ").trim();
+    return meta;
   } catch {
-    return "";
+    return meta;
   }
 }
 
@@ -160,7 +225,10 @@ function scan(ws) {
   const globalConfig = readJson(CLAUDE_JSON) || {};
   const localPath = path.join(ws, PROJECT_SETTINGS_REL);
   const sharedPath = path.join(ws, SHARED_SETTINGS_REL);
-  const local = readJson(localPath) || {};
+  // 坏掉的文件不能被当成「没有配置」：那样界面会显示成全部跟随全局，
+  // 用户再点一下就覆盖掉了。这里如实读，坏的单独报出来。
+  const localRead = readJsonStrict(localPath);
+  const local = localRead.value || {};
   const shared = readJson(sharedPath) || {};
 
   // 项目层：local 压过 shared；面板只写 local。
@@ -320,6 +388,8 @@ function scan(ws) {
       kind: "skill",
       id: s.name,
       name: s.name,
+      // 目录名与 frontmatter 不一致时，界面上要能看出文件在哪。
+      dirName: s.dirName,
       source: s.source,
       plugin: s.plugin,
       description: s.description || "",
@@ -363,6 +433,13 @@ function scan(ws) {
     diagnostics.push({ level, kind, id, name, message, fixable: Boolean(fixable) });
   };
 
+  // 配置文件坏了必须最优先报：这时列表里的一切都是「读不到」而不是「没设置」，
+  // 而且任何一次写入都会被拒绝（见 readForWrite）。
+  if (localRead.error) {
+    diag("error", "file", PROJECT_SETTINGS_REL, "settings.local.json",
+      "项目配置不是合法 JSON（" + localRead.error + "），面板不会写入，请先手动修复", false);
+  }
+
   const knownPlugins = new Set(plugins.map((p) => p.id));
   for (const id of Object.keys(local.enabledPlugins || {})) {
     if (!knownPlugins.has(id)) diag("stale", "plugin", id, id, "插件已不存在，本地仍保留开关", true);
@@ -375,6 +452,8 @@ function scan(ws) {
 
   const knownSkills = new Set(skillRows.map((r) => r.name));
   for (const name of Object.keys(local.skillOverrides || {})) {
+    // 旧版本用目录名当键，遇到 frontmatter 改了 name 的技能就会留下一条
+    // Claude Code 根本不认的键；按残留报出来，用户才知道该清掉。
     if (!knownSkills.has(name)) diag("stale", "skill", name, name, "技能已不存在，本地仍保留开关", true);
   }
   for (const r of skillRows) {
@@ -398,6 +477,18 @@ function scan(ws) {
     // 待审批是「看起来配了、其实没连」，比报错更难发现，必须单独提示。
     if (row.approval === "pending") {
       diag("warn", "mcp", row.id, row.name, "项目 .mcp.json 里定义但尚未批准，本次会话不会连接", false);
+    }
+  }
+  // 审批名单和 deniedMcpServers 一样会留残留：.mcp.json 里删掉的 server
+  // 仍占着批准/拒绝名单，列表里看不到，重装同名 server 时会突然被自动拒绝。
+  const projectMcpNames = new Set(Object.keys(projectMcp));
+  for (const key of ["enabledMcpjsonServers", "disabledMcpjsonServers"]) {
+    for (const name of Array.isArray(local[key]) ? local[key] : []) {
+      if (!projectMcpNames.has(name)) {
+        diag("stale", "mcpApproval", name, name,
+          "项目 .mcp.json 里已没有这个 server，本地仍保留" + (key === "enabledMcpjsonServers" ? "批准" : "拒绝") + "记录",
+          true);
+      }
     }
   }
 
@@ -471,6 +562,8 @@ function collectMemory(ws) {
     let rel = path.relative(root, abs).replace(/\\/g, "/");
     if (!rel || rel.startsWith("..")) {
       const fromHome = path.relative(HOME, abs).replace(/\\/g, "/");
+      // 配了 CLAUDE_CONFIG_DIR 时全局文件不在 HOME 下，相对路径会是一串 ..，
+      // 这时直接给绝对路径，用户复制去编辑器才打得开。
       rel = fromHome.startsWith("..") ? abs.replace(/\\/g, "/") : "~/" + fromHome;
     }
     files.push({
@@ -582,16 +675,25 @@ function readMemory(ws, target) {
   };
 }
 
+/**
+ * 诊断区的「清理残留」对所有类型都传 state=inherit，审批也一样：
+ * inherit 在这里就是「把这两个名单里的这一条删掉」，等价于回到待审批。
+ * 统一在这里转一次，清理路径就不用为审批开特例。
+ */
+function approvalStateForCleanup(state) {
+  return state === "inherit" ? "pending" : state;
+}
+
 function set(ws, kind, id, state) {
   const localPath = path.join(ws, PROJECT_SETTINGS_REL);
-  const current = readJson(localPath) || {};
+  const current = readForWrite(localPath);
   let next;
   let effective;
   if (kind === "plugin") next = setPluginState(current, id, state);
   else if (kind === "mcp") next = setMcpState(current, id, state);
   else if (kind === "skill") next = setSkillState(current, id, state);
   else if (kind === "mcpApproval") {
-    const out = setMcpApproval(current, id, state);
+    const out = setMcpApproval(current, id, approvalStateForCleanup(state));
     next = out.settings;
     effective = out.effective;
   } else throw new Error("未知类型：" + kind);
@@ -611,7 +713,7 @@ function setMany(ws, opsJson) {
   if (ops.length > 500) throw new Error("单次批量操作不能超过 500 项");
 
   const localPath = path.join(ws, PROJECT_SETTINGS_REL);
-  let next = readJson(localPath) || {};
+  let next = readForWrite(localPath);
   let applied = 0;
   for (const op of ops) {
     if (!op || typeof op !== "object") continue;
@@ -619,7 +721,9 @@ function setMany(ws, opsJson) {
     if (kind === "plugin") next = setPluginState(next, id, state);
     else if (kind === "mcp") next = setMcpState(next, id, state);
     else if (kind === "skill") next = setSkillState(next, id, state);
-    else if (kind === "mcpApproval") next = setMcpApproval(next, id, state).settings;
+    else if (kind === "mcpApproval") {
+      next = setMcpApproval(next, id, approvalStateForCleanup(state)).settings;
+    }
     else throw new Error("未知类型：" + kind);
     applied += 1;
   }
