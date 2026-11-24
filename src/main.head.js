@@ -587,7 +587,11 @@ export default function activate(ctx) {
       const appr = row.projectDefined
         ? (row.allApproved && row.approval === "approved" ? "全部批准" : APPROVAL_WORD[row.approval] || "")
         : "";
-      return ["MCP", src, g, team, appr].filter(Boolean).join(" · ");
+      // 卡住的层单独标出来：审批说「已批准」而圆点是灰的，不给理由就是矛盾。
+      const stuck = row.blocked && !["rejected", "pending"].includes(row.blocked)
+        ? BLOCK_WORD[row.blocked] || ""
+        : "";
+      return ["MCP", src, g, team, appr, stuck].filter(Boolean).join(" · ");
     }
     const src = row.source === "plugin"
       ? "插件 " + (row.plugin || "")
@@ -628,6 +632,29 @@ export default function activate(ctx) {
   };
 
   /**
+   * 卡住的原因。审批只是其中一层：被禁用、/mcp 关掉、工作区没信任
+   * 都会让一个「已批准」的 server 实际连不上，绿点必须为这些情况变灰。
+   */
+  const BLOCK_WORD = {
+    "global-denied": "全局禁用",
+    "project-denied": "项目禁用",
+    rejected: "已拒绝",
+    pending: "待批准",
+    untrusted: "工作区未信任",
+    "runtime-disabled": "/mcp 已关闭",
+  };
+  const BLOCK_TIP = {
+    "global-denied": "全局 settings.json 的 deniedMcpServers 已禁止它，项目级无法解除。",
+    "project-denied": "项目配置的 deniedMcpServers 禁用了它；点上面的开关恢复跟随即可。",
+    rejected: "项目 .mcp.json 的审批结果是拒绝；改成已批准后才会连接。",
+    pending: "还没批准；点旁边的按钮批准后才会连接。",
+    untrusted:
+      "已批准，但当前工作区尚未被 Claude Code 信任，批准不生效。在终端里运行一次 claude 并接受信任对话框；拒绝不受此限制。",
+    "runtime-disabled":
+      "在 /mcp 里被手动关了（记在 ~/.claude.json 的项目条目里）。这个开关不在本面板的写入范围内，请到 /mcp 里重新启用。",
+  };
+
+  /**
    * 项目 .mcp.json 定义的 server 还要单独走一道审批，和「禁用」是两码事：
    * 禁用写在 deniedMcpServers，审批写在 enabled/disabledMcpjsonServers。
    * 两者都成立才算真的连上，所以分开摆在同一个行里。
@@ -637,15 +664,25 @@ export default function activate(ctx) {
     const busyKey = "mcpApproval:" + row.id;
     const busy = store.busy === busyKey;
     const state = row.approval || "pending";
+    // 工作区没信任时，「批准」按下去也不会生效，按钮要提前说明，别让人白点。
+    const trustBlocked = !(store.data && store.data.workspaceTrusted) && state !== "rejected";
     const cycle = state === "approved" ? "rejected" : "approved";
     // 总开关开着时，单个「待批准」做不到：只能批准或拒绝，界面要说清楚。
     const lockPending = row.allApproved && state === "approved";
+    const stuck = row.blocked && row.blocked !== "rejected" && row.blocked !== "pending";
     return h("div", { className: "wc-approval" },
       h("span", {
         className: "wc-appr-dot wc-appr-" + state,
-        title: APPROVAL_TIP[state] + (lockPending
-          ? "（当前项目开了「全部批准」，无法单独回到待批准）" : ""),
+        title: APPROVAL_TIP[state]
+          + (lockPending ? "（当前项目开了「全部批准」，无法单独回到待批准）" : "")
+          + (trustBlocked ? "（工作区未信任，批准不会生效）" : ""),
       }, APPROVAL_WORD[state] || state),
+      stuck
+        ? h("span", {
+            className: "wc-appr-dot wc-appr-pending",
+            title: BLOCK_TIP[row.blocked] || "",
+          }, BLOCK_WORD[row.blocked] || row.blocked)
+        : null,
       h("button", {
         type: "button",
         className: "wc-appr-btn",
@@ -738,9 +775,8 @@ export default function activate(ctx) {
     if (row.effectiveState === "name-only") return "生效：仅名称";
     if (row.effectiveState === "user-invocable-only") return "生效：仅手动调用";
     if (row.effectiveState === "off") {
-      // 被「没批准」挡掉和「被禁用」是两回事，绿点变灰时要说得出原因。
-      if (row.kind === "mcp" && row.approval === "pending") return "生效：关（项目里还没批准）";
-      if (row.kind === "mcp" && row.approval === "rejected") return "生效：关（项目里已拒绝）";
+      // 灰点要说得出是哪一层挡住的，否则用户会以为开关坏了。
+      if (row.blocked && BLOCK_WORD[row.blocked]) return "生效：关（" + BLOCK_WORD[row.blocked] + "）";
       return "生效：关";
     }
     return "生效：未知";
@@ -775,6 +811,14 @@ export default function activate(ctx) {
   }
 
   function flowNote(row) {
+    if (row.kind === "mcp" && row.blocked === "untrusted") {
+      return "已批准，但当前工作区还没被 Claude Code 信任，批准不生效，仍按待审批处理。"
+        + "在终端里运行一次 claude 并接受信任对话框即可；拒绝不受这条限制。";
+    }
+    if (row.kind === "mcp" && row.blocked === "runtime-disabled") {
+      return "在 /mcp 里被手动关闭了，记录在 ~/.claude.json 的项目条目里，不在本面板的写入范围。"
+        + "要恢复请到 /mcp 里重新启用。";
+    }
     if (row.kind === "mcp" && row.approval === "pending") {
       return "项目 .mcp.json 里定义了它，但还没批准，本次会话不会连接；点上方「待批准」旁的按钮改为已批准后，下次会话生效。";
     }
@@ -847,6 +891,11 @@ export default function activate(ctx) {
             expandable ? h("span", { className: "wc-caret" }, open ? "▾" : "▸") : null
           ),
           h("div", { className: "wc-meta" }, metaOf(row, compact)),
+          // 非项目来源的 server 被 /mcp 关掉时，这一行没有审批控件，
+          // 不额外标一句的话，灰点就完全没解释。
+          row.kind === "mcp" && !row.projectDefined && row.blocked === "runtime-disabled"
+            ? h("div", { className: "wc-desc", title: BLOCK_TIP["runtime-disabled"] }, "在 /mcp 里被关闭")
+            : null,
           showDesc && row.description
             ? h("div", { className: "wc-desc", title: row.description }, row.description)
             : null
@@ -857,12 +906,12 @@ export default function activate(ctx) {
               title: "这个技能随插件加载，不能单独关闭；要禁用它，请在「插件」里关闭 "
                 + (row.plugin || "所属插件"),
             }, "随插件")
-          : row.kind === "mcp" && row.projectDefined
-            ? h("div", { className: "wc-row-actions" },
-                h(Seg, { row: v, compact }),
-                h(ApprovalSeg, { row: v, compact })
-              )
-            : h(Seg, { row: v, compact })
+        : row.kind === "mcp" && row.projectDefined
+          ? h("div", { className: "wc-row-actions" },
+              h(Seg, { row: v, compact }),
+              h(ApprovalSeg, { row: v, compact })
+            )
+          : h(Seg, { row: v, compact })
       ),
       open && expandable ? h(Flow, { row }) : null
     );

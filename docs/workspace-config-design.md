@@ -81,6 +81,25 @@ Claude Code 本身有项目级覆盖机制，但散落在三个键、三套语�
 
 审批只对 `project` 来源有定义；`local` / `user` / `plugin` 来源的 server 不弹这个窗，界面也不显示审批控件。
 
+### 2.5 还有两道不在本插件写入范围内的闸
+
+「文件里写着批准」不等于「真的连上」。2026-11-24 用 claude 2.1.319 实测确认，另外还有两层会让一个已批准的 server 停在未连接状态，面板必须照实说出来，否则就是一个骗人的绿点：
+
+| 闸 | 存放位置 | 语义 |
+|---|---|---|
+| 工作区信任 | `~/.claude.json` 的 `projects[<ws>].hasTrustDialogAccepted === true` | **批准侧的总闸**：未信任时批准一律不生效，仍按待审批处理；拒绝不受影响 |
+| `/mcp` 手动开关 | `~/.claude.json` 的 `projects[<ws>].disabledMcpServers` | `/mcp` 里关掉的 server；键名没有 `Mcpjson`，与 `deniedMcpServers` 是两个完全不同的键；**同样只在已信任时生效** |
+
+两处都在 `~/.claude.json`，不在任何 settings 文件，因此本插件只读不写（保持「绝不碰全局」的边界）。判定统一收在 `model.mjs` 的 `mcpBlockReason()` 里，按 Claude Code 的优先级返回唯一的卡住原因：
+
+```
+global-denied → project-denied → rejected → pending → untrusted → runtime-disabled → null（会连上）
+```
+
+`null` 才是绿点；其余六种都会让 `effectiveState` 落成 `off`，并在行上标出具体是哪一层挡住的（`blocked` 字段）。信任只挡「批准」这一侧，所以没有审批可言的来源（`approval === null`）不会被误判；`/mcp` 开关同样加了信任门槛——未信任时 Claude Code 根本不看它，面板也就不能据此说「被关了」。
+
+诊断侧对应三条：`untrusted` 逐条 warn（说明怎么解）、`runtime-disabled` 逐条 warn（说明去 `/mcp` 恢复）、以及未信任且存在项目 server 时一条工作区级 info 汇总（逐条说会刷屏）。
+
 ## 3. 架构
 
 ```
@@ -113,14 +132,17 @@ projectState: "inherit" | "on" | "off"                      // 插件、MCP
 projectState: "inherit" | "on" | "name-only"
             | "user-invocable-only" | "off"                  // 技能
 approval:    "pending" | "approved" | "rejected" | null      // 仅 project 来源的 MCP
+blocked:     "global-denied" | "project-denied" | "rejected"
+           | "pending" | "untrusted" | "runtime-disabled" | null   // null 才是真的会连上
 effectiveState = projectState === "inherit" ? globalState : projectState
-               // MCP 再叠加「是否真的连上」：禁用或被审批挡住都是 off
+               // MCP 再叠加「是否真的连上」：blocked 非 null 时一律 off
 ```
 
 - `inherit` 表示不写键，改回 `inherit` 会删除对应条目并清理空对象/空数组
 - MCP 的 `on` 在写入层直接拒绝
 - 全局状态只用于展示，不参与写入决策
 - 审批与禁用分开存储、分开写入：`mcpApproval` 是一个独立的写操作，不碰 `deniedMcpServers`
+- `blocked` 由纯函数 `mcpBlockReason()` 统一判定，六种原因按 Claude Code 的优先级只出一个（见 2.5）
 
 ### 4.1 写入前的安全检查
 
@@ -137,7 +159,7 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | 文件/目录 | 用途 |
 |---|---|
 | `~/.claude/settings.json` | 全局 `enabledPlugins`、`skillOverrides`、`deniedMcpServers` |
-| `~/.claude.json` | user / local 两层 MCP |
+| `~/.claude.json` | user / local 两层 MCP；项目条目里的 `hasTrustDialogAccepted`（工作区信任）与 `disabledMcpServers`（`/mcp` 开关）只读，用于解释假绿点 |
 | `~/.claude/plugins/installed_plugins.json` | 已安装插件及其 `installPath` |
 | `~/.claude/plugins/cache/**/skills/*/SKILL.md` | plugin 技能 |
 | `~/.claude/skills/*/SKILL.md` | personal 技能 |
@@ -178,8 +200,8 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 |---|---|---|
 | `error` | `settings.local.json` 不是合法 JSON，面板拒绝写入 | 否 |
 | `stale` | local 里有键，但对应插件 / 技能 / MCP 已不存在；`.mcp.json` 里已没有的 server 仍留在审批名单里 | 是 |
-| `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖；项目 `.mcp.json` 的 server 待审批 | 否 |
-| `info` | 项目技能被同名个人技能遮蔽 | 否 |
+| `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖；项目 `.mcp.json` 的 server 待审批；已批准但工作区未信任；`/mcp` 里被手动关闭 | 否 |
+| `info` | 项目技能被同名个人技能遮蔽；工作区未信任且存在项目 server（汇总一条，不逐条刷屏） | 否 |
 
 残留项之所以必须由诊断区处理：列表只列现存资源，这些键不在任何列表里，用户没有其他入口。清理复用 `setMany` 的 `inherit` 操作，不新增写命令；审批类型在写入层把 `inherit` 翻译成 `pending`，等价于「把这一条从两个名单里删掉」。
 
@@ -192,6 +214,8 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 ```
 
 数据全部来自 `scan` 已有的状态字段，纯展示。`[审批]` 只对项目 `.mcp.json` 定义的 server 出现。侧栏（`compact`）不提供展开，保持简洁。
+
+`blocked` 非 `null` 且不是「待审批 / 已拒绝」时，行尾在审批徽标旁再挂一个灰徽标（`工作区未信任` / `/mcp 已关闭`），链路下方追加一句说明；灰点的 `title` 也会写成 `生效：关（工作区未信任）` 这种带原因的形式，避免用户以为开关坏了。
 
 ### 6.4 记忆浏览（只读）
 
@@ -224,8 +248,9 @@ node config-io.mjs memoryRead <workspace> <path> 读正文
 4. 项目 `.mcp.json` 的「待审批」在 `enableAllProjectMcpServers: true` 时不可达，界面只能提示
 5. 共享包 `validate-core` 未覆盖 `registerPanelTab` 的权限检测，产生一条固定 warn
 6. 远程工作区（`host:workspace:remote`）下 `exec:node` 的执行位置未验证
+7. 工作区信任与 `/mcp` 开关存在 `~/.claude.json`，本插件只读不写：能解释「为什么批准了没连上」，但不能替用户在面板里翻这两个开关（写全局违反本插件的边界）
 
 ## 8. 测试
 
-- 17 条纯逻辑单测：三态读写、技能四态往返与 `unknown` 只读、`.mcp.json` 审批（拒绝优先、名单互斥、总开关语义）、空键清理、保留非托管键、生效态
-- 206 项冒烟检查（当前 232 项）：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；另含坏 JSON 文件拒绝写入、审批名单残留可清理、`CLAUDE_CONFIG_DIR` 生效、frontmatter `name` 覆盖目录名四组用例；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写
+- 18 条纯逻辑单测：三态读写、技能四态往返与 `unknown` 只读、`.mcp.json` 审批（拒绝优先、名单互斥、总开关语义）、`mcpBlockReason` 五道闸的优先级与信任只挡批准侧、空键清理、保留非托管键、生效态
+- 255 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；另含坏 JSON 文件拒绝写入、审批名单残留可清理、`CLAUDE_CONFIG_DIR` 生效、frontmatter `name` 覆盖目录名四组用例；**信任层与 `/mcp` 开关**一组覆盖「未信任 + 已批准 → untrusted / off / 有 warn 诊断」「已信任 → 连上」「`/mcp` 关闭 → runtime-disabled」「拒绝不受信任影响」「全局禁用压过一切」「汇总 info 只出一条」；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、**未信任时灰点 + 徽标 + title 三处都要说出来**、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写

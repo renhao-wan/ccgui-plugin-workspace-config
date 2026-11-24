@@ -112,6 +112,10 @@ export function setSkillState(project, name, state) {
 //   enabledMcpjsonServers: [name…]     逐个批准
 //   disabledMcpjsonServers: [name…]    逐个拒绝；优先级高于前两者
 // 未出现在任何名单里且没开「全部批准」时，server 是待审批状态：不连、界面上不该显示成生效。
+//
+// 还有一层别处管不到：工作区没被信任时（~/.claude.json 的 projects[ws]
+// .hasTrustDialogAccepted 不为 true），**批准一律不生效**，仍然停在待审批；
+// 拒绝不受影响。这条是 2026-11-24 用 claude 2.1.319 实测确认的。
 
 export function getMcpApproval(project, serverName) {
   const disabled = Array.isArray(project.disabledMcpjsonServers) ? project.disabledMcpjsonServers : [];
@@ -144,6 +148,33 @@ export function setMcpApproval(project, serverName, state) {
   // 总开关开着时「待审批」无法靠单个名单实现，如实回报，让界面说明原因。
   const blockedByAll = state === "pending" && next.enableAllProjectMcpServers === true;
   return { settings: prune(next), effective: blockedByAll ? "approved" : state };
+}
+
+/**
+ * server 到底连没连上，以及卡在哪一层。返回 null 表示确实会连接。
+ *
+ * 五道闸按 Claude Code 的判定顺序排列（2026-11-24 用 2.1.319 实测）：
+ *   global-denied   ~/.claude/settings.json 的 deniedMcpServers（对象格式才生效）
+ *   project-denied  本项目 deniedMcpServers
+ *   rejected        项目 .mcp.json 的拒绝，任何情况下都生效
+ *   pending         还没批准
+ *   untrusted       批准了，但工作区没被信任 —— 批准不生效，仍停在待审批
+ *   runtime-disabled /mcp 里手动关掉的（~/.claude.json 项目条目的 disabledMcpServers）
+ */
+export function mcpBlockReason({ globalDenied, projectDenied, approval, trusted, runtimeDisabled }) {
+  if (globalDenied) return "global-denied";
+  if (projectDenied) return "project-denied";
+  if (approval === "rejected") return "rejected";
+  if (approval === "pending") return "pending";
+  // 未信任时 Claude Code 连「已批准」都不认，这是最容易漏的一层：
+  // 面板写批准、文件里也确实写着批准，实际却还是待审批。
+  // 只挡批准这一侧——没有审批可挡的 server（user/local/plugin 来源）不受影响，
+  // 否则 !undefined 会把它们全部误判成未信任。
+  if (approval === "approved" && !trusted) return "untrusted";
+  // /mcp 的手动开关（disabledMcpServers）同样录在 ~/.claude.json 的项目条目里，
+  // 未信任时 Claude Code 根本不看它，这里也就不能据此说「被关了」。
+  if (runtimeDisabled && trusted) return "runtime-disabled";
+  return null;
 }
 
 /* ------------------------------------------------------------ 展示用 */

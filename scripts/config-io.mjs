@@ -23,6 +23,7 @@ import {
   setMcpState,
   getMcpApproval,
   setMcpApproval,
+  mcpBlockReason,
   getSkillState,
   setSkillState,
   effectiveState,
@@ -279,7 +280,8 @@ function scan(ws) {
   /* ---------------- mcp ---------------- */
 
   const userMcp = globalConfig.mcpServers || {};
-  const localMcp = (findProjectEntry(globalConfig, ws) || {}).mcpServers || {};
+  const globalConfigProject = findProjectEntry(globalConfig, ws) || {};
+  const localMcp = globalConfigProject.mcpServers || {};
   const projectMcp = (readJson(path.join(ws, ".mcp.json")) || {}).mcpServers || {};
 
   // 插件自带的 MCP：plugin 包里的 .mcp.json，同样能被 deniedMcpServers 拦住。
@@ -323,6 +325,15 @@ function scan(ws) {
     return out;
   })();
 
+  // 工作区信任与 /mcp 的手动开关都住在 ~/.claude.json 的项目条目里，
+  // 不在任何 settings 文件，所以前面几条读取路径都碰不到。
+  // hasTrustDialogAccepted 只有显式 true 才算信任；未设置、false 都按未信任处理。
+  const workspaceTrusted = globalConfigProject.hasTrustDialogAccepted === true;
+  // /mcp 里关掉的 server，键名是 disabledMcpServers（没有 Mcpjson）。
+  const runtimeDisabledInProject = Array.isArray(globalConfigProject.disabledMcpServers)
+    ? globalConfigProject.disabledMcpServers
+    : [];
+
   const mcp = [...mcpNames].sort().map((name) => {
     const scopes = [];
     if (localMcp[name]) scopes.push("local");
@@ -340,9 +351,15 @@ function scan(ws) {
     // 审批只对来自项目 .mcp.json 的定义有意义；user/local/plugin 来源不弹这个窗。
     const approval = projectMcp[name] ? getMcpApproval(approvalLayer, name) : null;
     const projectDenied = getMcpState(projectLayer, name) === "off";
-    // 未批准、已拒绝都等于「没连上」。以前只看 denylist，会把待审批的 server
-    // 显示成绿点生效——这正是本项目最容易误导人的地方。
-    const connected = !deniedGlobally && !projectDenied && approval !== "pending" && approval !== "rejected";
+    const blocked = projectMcp[name]
+      ? mcpBlockReason({
+          globalDenied: deniedGlobally,
+          projectDenied,
+          approval,
+          trusted: workspaceTrusted,
+          runtimeDisabled: runtimeDisabledInProject.includes(name),
+        })
+      : mcpBlockReason({ globalDenied: deniedGlobally, projectDenied, approval: null });
     return {
       kind: "mcp",
       id: name,
@@ -359,7 +376,9 @@ function scan(ws) {
       projectDefined: Boolean(projectMcp[name]),
       approval,
       allApproved: approvalLayer.enableAllProjectMcpServers === true,
-      effectiveState: connected ? effectiveState(projectState, "on") : "off",
+      // null = 会连上；其余是卡住的原因，界面要照实说出来。
+      blocked,
+      effectiveState: blocked ? "off" : effectiveState(projectState, "on"),
     };
   });
 
@@ -478,6 +497,19 @@ function scan(ws) {
     if (row.approval === "pending") {
       diag("warn", "mcp", row.id, row.name, "项目 .mcp.json 里定义但尚未批准，本次会话不会连接", false);
     }
+    // 批准了却没被信任，是比待审批更隐蔽的一种「假绿点」：文件里明明写着批准。
+    if (row.blocked === "untrusted") {
+      diag("warn", "mcp", row.id, row.name,
+        "已批准，但工作区尚未被信任，Claude Code 仍按待审批处理；在终端里运行一次 claude 并接受信任对话框", false);
+    }
+    if (row.blocked === "runtime-disabled") {
+      diag("warn", "mcp", row.id, row.name, "在 /mcp 里被手动关闭了；要恢复请在 /mcp 里重新启用", false);
+    }
+  }
+  if (!workspaceTrusted && mcp.some((r) => r.projectDefined)) {
+    // 一个工作区里可能有好几个 .mcp.json server，逐条说会刷屏，这里汇总一条。
+    diag("info", "workspace", ws, "工作区",
+      "本项目尚未被信任：.mcp.json 里 server 的批准不会生效（拒绝仍然生效）", false);
   }
   // 审批名单和 deniedMcpServers 一样会留残留：.mcp.json 里删掉的 server
   // 仍占着批准/拒绝名单，列表里看不到，重装同名 server 时会突然被自动拒绝。
@@ -501,6 +533,8 @@ function scan(ws) {
     mcp,
     skills: skillRows,
     diagnostics,
+    // 界面要拿它解释「为什么批准了还没连上」。
+    workspaceTrusted,
   };
 }
 

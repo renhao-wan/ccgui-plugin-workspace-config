@@ -9,6 +9,7 @@ import {
   setSkillState,
   getMcpApproval,
   setMcpApproval,
+  mcpBlockReason,
   overrideCount,
   effectiveState,
   prune,
@@ -144,6 +145,33 @@ test("overrideCount 计入审批条目与总开关", () => {
   assert.equal(overrideCount({ enabledMcpjsonServers: ["a", "b"] }), 2);
   assert.equal(overrideCount({ disabledMcpjsonServers: ["a"] }), 1);
   assert.equal(overrideCount({ enableAllProjectMcpServers: true }), 1);
+});
+
+test("mcpBlockReason：五道闸按 Claude Code 的判定顺序", () => {
+  const ok = { globalDenied: false, projectDenied: false, approval: "approved", trusted: true, runtimeDisabled: false };
+  assert.equal(mcpBlockReason(ok), null);
+
+  // 禁用压过审批：批准了也不连；全局禁用又压过项目禁用。
+  assert.equal(mcpBlockReason({ ...ok, projectDenied: true }), "project-denied");
+  assert.equal(mcpBlockReason({ ...ok, globalDenied: true }), "global-denied");
+  assert.equal(mcpBlockReason({ ...ok, globalDenied: true, projectDenied: true }), "global-denied");
+
+  assert.equal(mcpBlockReason({ ...ok, approval: "rejected" }), "rejected");
+  assert.equal(mcpBlockReason({ ...ok, approval: "pending" }), "pending");
+
+  // 信任只挡「批准」这一侧：未信任时批准不生效，但拒绝照旧。
+  assert.equal(mcpBlockReason({ ...ok, trusted: false }), "untrusted");
+  assert.equal(mcpBlockReason({ ...ok, trusted: false, approval: "rejected" }), "rejected");
+  assert.equal(mcpBlockReason({ ...ok, trusted: false, approval: "pending" }), "pending");
+  // 没有审批可言的 server（user/local/plugin 来源）不该被信任层误伤。
+  assert.equal(mcpBlockReason({ ...ok, trusted: false, approval: null }), null);
+  assert.equal(mcpBlockReason({ ...ok, trusted: false, approval: undefined }), null);
+
+  // /mcp 的手动开关排在审批之后，且同样只有信任后才生效。
+  assert.equal(mcpBlockReason({ ...ok, runtimeDisabled: true }), "runtime-disabled");
+  assert.equal(mcpBlockReason({ ...ok, runtimeDisabled: true, approval: "pending" }), "pending");
+  assert.equal(mcpBlockReason({ ...ok, runtimeDisabled: true, trusted: false }), "untrusted");
+  assert.equal(mcpBlockReason({ ...ok, runtimeDisabled: true, trusted: false, approval: null }), null);
 });
 
 test("未管理的键原样保留", () => {

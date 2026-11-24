@@ -59,7 +59,9 @@ fs.writeFileSync(
   JSON.stringify(
     {
       mcpServers: { tavily: { type: "stdio", command: "tavily" }, blocked: { type: "stdio" } },
-      projects: { [ws]: { mcpServers: { "local-one": { type: "stdio" } } } },
+      // 主 fixture 测的是审批流程本身，工作区按已信任处理；
+      // 未信任那条线在下面「信任层与 /mcp 开关」单独造。
+      projects: { [ws]: { mcpServers: { "local-one": { type: "stdio" } }, hasTrustDialogAccepted: true } },
     },
     null,
     2,
@@ -377,7 +379,82 @@ fs.writeFileSync(localPath, "{}");
   assert.equal(run(["scan", staleWs]).diagnostics.filter((d) => d.kind === "mcpApproval").length, 0);
 }
 
-/* ------------------------------------------------------------ 团队层 */
+/* ------------------------------------------------------------ 信任层与 /mcp 开关 */
+
+// 2026-11-24 用 claude 2.1.319 实测：工作区没被信任时，「批准」一律不生效
+// （仍是 Pending），而「拒绝」照旧生效；/mcp 里关掉的 server 记在
+// ~/.claude.json 的项目条目 disabledMcpServers 里，同样需要信任才生效。
+// 面板若只看审批名单，就会在这些情况下显示假绿点。
+{
+  const claudeJsonPath = path.join(home, ".claude.json");
+  const trustWs = path.join(tmp, "trust-ws");
+  fs.mkdirSync(path.join(trustWs, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(trustWs, ".mcp.json"), JSON.stringify({
+    mcpServers: {
+      "approved-untrusted": { command: "x" },
+      "approved-trusted": { command: "x" },
+      "rejected-untrusted": { command: "x" },
+      "pending-any": { command: "x" },
+      "runtime-off": { command: "x" },
+    },
+  }));
+  fs.writeFileSync(path.join(trustWs, ".claude", "settings.local.json"), JSON.stringify({
+    enabledMcpjsonServers: ["approved-untrusted", "approved-trusted", "runtime-off"],
+    disabledMcpjsonServers: ["rejected-untrusted"],
+  }));
+
+  const writeGlobalJson = (projectPatch) => {
+    const doc = JSON.parse(fs.readFileSync(claudeJsonPath, "utf8"));
+    doc.projects = doc.projects || {};
+    doc.projects[trustWs] = Object.assign({ mcpServers: {} }, doc.projects[trustWs], projectPatch);
+    fs.writeFileSync(claudeJsonPath, JSON.stringify(doc, null, 2));
+  };
+
+  // 未信任：已批准仍算卡在 untrusted，已拒绝不受影响。
+  writeGlobalJson({ hasTrustDialogAccepted: false });
+  const untrusted = byId(run(["scan", trustWs]).mcp);
+  assert.equal(untrusted["approved-untrusted"].approval, "approved");
+  assert.equal(untrusted["approved-untrusted"].blocked, "untrusted", "未信任时批准不生效");
+  assert.equal(untrusted["approved-untrusted"].effectiveState, "off", "卡住的 server 不能显示成生效");
+  assert.equal(untrusted["rejected-untrusted"].blocked, "rejected", "拒绝不需要信任");
+  assert.equal(untrusted["pending-any"].blocked, "pending");
+  assert.equal(run(["scan", trustWs]).workspaceTrusted, false);
+  assert.ok(
+    run(["scan", trustWs]).diagnostics.some((d) => d.kind === "mcp" && d.id === "approved-untrusted"
+      && /信任/.test(d.message)),
+    "已批准但未信任要有一条 warn 诊断",
+  );
+  // 多条 projectDefined 时只汇总一条工作区级 info，不逐条刷屏。
+  const wsTrustDiag = run(["scan", trustWs]).diagnostics.filter(
+    (d) => d.kind === "workspace" && /尚未被信任/.test(d.message),
+  );
+  assert.equal(wsTrustDiag.length, 1);
+
+  // 已信任：批准生效；/mcp 关掉的接上第三根轴。
+  writeGlobalJson({ hasTrustDialogAccepted: true, disabledMcpServers: ["runtime-off"] });
+  const trustedScan = run(["scan", trustWs]);
+  const trusted = byId(trustedScan.mcp);
+  assert.equal(trustedScan.workspaceTrusted, true);
+  assert.equal(trusted["approved-trusted"].blocked, null, "已信任 + 已批准应连上");
+  assert.equal(trusted["approved-trusted"].effectiveState, "on");
+  assert.equal(trusted["runtime-off"].blocked, "runtime-disabled", "/mcp 手动关闭要被识别");
+  assert.equal(trusted["runtime-off"].effectiveState, "off");
+  assert.ok(
+    trustedScan.diagnostics.some((d) => d.kind === "mcp" && d.id === "runtime-off" && /mcp/i.test(d.message)),
+    "/mcp 关闭要有一条 warn 诊断",
+  );
+  assert.equal(
+    trustedScan.diagnostics.some((d) => d.kind === "workspace" && /尚未被信任/.test(d.message)),
+    false,
+    "已信任时不该再有未信任汇总诊断",
+  );
+
+  // 全局禁用优先于一切：未信任 + 已拒绝也还是全局禁用。
+  const deniedScan = byId(run(["scan", ws]).mcp);
+  assert.equal(deniedScan.blocked.blocked, "global-denied");
+  assert.equal(deniedScan.blocked.effectiveState, "off");
+}
+
 
 // 仓库里的 .claude/settings.json（团队层）：面板只读，写入永远只落 local。
 fs.writeFileSync(
@@ -771,6 +848,55 @@ fs.writeFileSync(localPath, JSON.stringify({
   // 诊断一切正常时整块不该出现：占一行只会挤列表。
   // 这一段的 fixture 覆盖都是有效的（alpha@market 仍存在），所以 diagnostics 为空。
   assert.equal(byClassAll(centerTree, "wc-diag").length, 0, "没有诊断项时不该渲染诊断块");
+
+  // 工作区未信任：proj-one 的审批结果确实写着「已批准」，但界面上必须同时
+  // 说出「工作区未信任」，否则就是一个骗人的绿点。测完改回已信任。
+  {
+    const cjPath = path.join(home, ".claude.json");
+    const cj = JSON.parse(fs.readFileSync(cjPath, "utf8"));
+    cj.projects[ws].hasTrustDialogAccepted = false;
+    fs.writeFileSync(cjPath, JSON.stringify(cj, null, 2));
+    byClassAll(centerTree, "wc-nav-item").find((n) => textOf(n).includes("MCP")).props.onClick();
+    centerTree = R.renderKeep(Center, {});
+    byClassAll(centerTree, "wc-refresh")[0].props.onClick();
+    let untrustedRow = null;
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      centerTree = R.renderKeep(Center, {});
+      const detail = byClassAll(centerTree, "wc-detail")[0];
+      if (!detail) continue;
+      untrustedRow = byClassAll(detail, "wc-row").find((n) => textOf(n).includes("proj-one"));
+      if (untrustedRow && textOf(untrustedRow).includes("工作区未信任")) break;
+    }
+    assert.ok(untrustedRow, "未信任场景下 MCP 列表缺少 proj-one");
+    assert.equal(
+      byClassAll(untrustedRow, "wc-appr-approved").length, 1,
+      "审批结果本身仍是已批准，不该被改写成别的",
+    );
+    assert.match(textOf(untrustedRow), /工作区未信任/, "未信任时行上必须标出卡住的原因");
+    // 灰点和它的 title 才是「生效状态」本体；徽标只是把原因说出来。
+    const unDot = byClassAll(untrustedRow, "wc-dot")[0];
+    assert.ok(unDot, "行上没有生效状态圆点");
+    assert.ok(
+      String(unDot.props.className).includes(" off"),
+      "卡住的 server 圆点必须变灰，不能还是绿的",
+    );
+    assert.equal(unDot.props.title, "生效：关（工作区未信任）", "圆点 title 要说清是哪一层挡住的");
+    // 拒绝不受信任影响：rejected 行不该被贴上未信任徽标。
+    cj.projects[ws].hasTrustDialogAccepted = true;
+    fs.writeFileSync(cjPath, JSON.stringify(cj, null, 2));
+    byClassAll(centerTree, "wc-refresh")[0].props.onClick();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      centerTree = R.renderKeep(Center, {});
+      const detail = byClassAll(centerTree, "wc-detail")[0];
+      if (!detail) continue;
+      const row = byClassAll(detail, "wc-row").find((n) => textOf(n).includes("proj-one"));
+      if (row && !textOf(row).includes("工作区未信任")) break;
+    }
+    byClassAll(centerTree, "wc-nav-item")[0].props.onClick();
+    centerTree = R.renderKeep(Center, {});
+  }
 
   // 顶部区可收起：收起后统计/搜索/诊断全消失，只剩一条带概览 chips 的紧凑条；
   // 再点一次能展开回来。状态经 saveSettings 落 storage，跨会话保持。
