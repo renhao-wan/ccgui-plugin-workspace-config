@@ -661,11 +661,16 @@ fs.writeFileSync(localPath, JSON.stringify({
   const disposers = [];
   // 宿主当前会话的工作区。初始为空表示「宿主还没准备好」，插件不该据此清空视图。
   const host = { path: "" };
+  // 捕获注入的样式，用来断言 Toast 的底色与原生控件的替身。
+  let capturedCss = "";
   const ctx = {
     react: R.api,
     pluginId: MANIFEST.id,
     version: MANIFEST.version,
-    theme: { injectCss: () => {}, setTokens: () => {} },
+    theme: {
+      injectCss(css) { if (typeof css === "string" && css.includes("wc-toast")) capturedCss = css; },
+      setTokens: () => {},
+    },
     storage: {
       _data: {},
       async get(k) { return this._data[k]; },
@@ -709,6 +714,14 @@ fs.writeFileSync(localPath, JSON.stringify({
   assert.ok(registered.sidebar, "没有注册侧栏入口");
   assert.ok(registered.command, "没有注册命令面板入口");
   assert.ok(registered.settings, "没有注册设置页");
+
+  // 操作后的提示必须有不透明底色：半透明会叠在下面的列表文字上，读不清。
+  const toastRule = (capturedCss.match(/\.wc-toast-line\s*\{[^}]*\}/) || [""])[0];
+  assert.ok(toastRule, "样式里找不到 .wc-toast-line");
+  assert.match(toastRule, /background:\s*var\(--color-background-primary-default/,
+    "Toast 必须用宿主主题色做实底，不能是半透明");
+  assert.equal(toastRule.includes("rgba(127,127,127,.16)"), false,
+    "Toast 不能再用半透明灰底");
 
   // 右侧面板：跟随 workspacePath，应当渲染出当前工作区的三类资源。
   const Panel = registered.panel.component;
@@ -756,8 +769,24 @@ fs.writeFileSync(localPath, JSON.stringify({
     const selects = byClassAll(skillRowPanel, "wc-select");
     assert.equal(selects.length, 1, "侧栏技能应渲染成一个下拉而不是五个按钮");
     assert.equal(byClassAll(skillRowPanel, "wc-seg").length, 0, "侧栏技能不该同时渲染按钮组");
-    assert.equal(selects[0].props.value, "name-only", "侧栏下拉的当前值应与文件里的 name-only 一致");
+    // 必须是自绘下拉：原生 <select> 在 Windows 上会露出系统控件的外观。
+    assert.equal(selects[0].type, "button", "侧栏下拉必须是自绘按钮，不能是原生 select");
+    assert.equal(findAll(skillRowPanel, (n) => n && n.type === "select").length, 0,
+      "侧栏不允许出现原生 <select> 控件");
+    assert.equal(textOf(selects[0]), "仅名称", "侧栏下拉的当前值应与文件里的 name-only 一致");
+    // 展开后五档都在，当前项要高亮；再点一次收起。
+    selects[0].props.onClick();
+    tree = R.renderKeep(Panel, { workspacePath: ws });
+    const rowOpen = byClassAll(tree, "wc-row").find((n) => textOf(n).includes("project-skill"));
+    const menuItems = byClassAll(rowOpen, "wc-menu-item");
+    assert.equal(menuItems.length, 5, "自绘下拉展开后应有五档");
+    const currentItem = menuItems.find((n) => String(n.props.className || "").split(/\s+/).includes("wc-on"));
+    assert.ok(currentItem, "下拉里当前档位没有高亮");
+    assert.equal(textOf(currentItem), "仅名称", "高亮的应是当前值 name-only");
     assert.ok(!textOf(tree).includes("undefined"), "侧栏技能下拉文案里出现了 undefined");
+    byClassAll(rowOpen, "wc-select")[0].props.onClick();
+    tree = R.renderKeep(Panel, { workspacePath: ws });
+    assert.equal(byClassAll(tree, "wc-menu-item").length, 0, "再次点击下拉应收起菜单");
     byClassAll(tree, "wc-tab")[1].props.onClick();
     tree = R.renderKeep(Panel, { workspacePath: ws });
   }

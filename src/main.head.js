@@ -163,8 +163,17 @@ const STYLE = `
 .wc-btn.wc-on { background: rgba(79,140,255,.16); font-weight: 600; }
 .wc-btn:disabled { opacity: .38; cursor: default; }
 /* 侧栏窄：技能四态改成下拉，省下的宽度全给名字 */
-.wc-select { flex: none; max-width: 92px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
+.wc-select-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.wc-select { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
 .wc-select:disabled { opacity: .38; cursor: default; }
+.wc-select-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-select-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
+.wc-select-caret.wc-up { transform: rotate(180deg); }
+.wc-menu { display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--color-background-primary-default, #232326); border: 1px solid rgba(127,127,127,.2); }
+.wc-menu-item { font: inherit; font-size: 11.5px; text-align: left; padding: 4px 9px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+.wc-menu-item:hover { background: rgba(127,127,127,.16); }
+.wc-menu-item.wc-on { font-weight: 600; background: rgba(127,127,127,.12); }
+.wc-menu-item:disabled { opacity: .38; cursor: default; }
 .wc-seg-unknown { padding: 0; }
 /* 项目 .mcp.json 的审批：和「禁用」并排的第二根轴 */
 .wc-row-actions { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -205,10 +214,11 @@ const STYLE = `
 .wc-stat-num { font-size: 22px; font-weight: 600; line-height: 1.2; }
 .wc-stat-label { margin-top: 2px; font-size: 12px; opacity: .6; }
 .wc-toast { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 10; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
-/* 与列表里的提示同一套中性色，不再用深色块和彩色描边 */
-.wc-toast-line { padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; background: rgba(127,127,127,.16); color: inherit; }
-.wc-toast-ok { color: #2f9e44; }
-.wc-toast-err { color: #d9534f; }
+/* 与列表里的提示同一套中性色，不再用深色块和彩色描边。
+ * 底色必须不透明：半透明会叠在下面的列表文字上，读不清。 */
+.wc-toast-line { padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; background: var(--color-background-primary-default, #232326); color: var(--color-text-primary, inherit); }
+.wc-toast-ok { color: var(--color-text-success, #2f9e44); }
+.wc-toast-err { color: var(--color-text-error-primary, #d9534f); }
 .wc-settings { padding: 4px 0; font-size: 13px; }
 .wc-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .wc-check input { width: 15px; height: 15px; }
@@ -829,6 +839,42 @@ export default function activate(ctx) {
     );
   }
 
+  /**
+   * 侧栏用的自绘下拉。
+   * 不用 <select>：Windows 下它会渲染成系统原生控件，和宿主界面完全不是一套外观。
+   * 展开的菜单是行内展开而不是浮层，滚动容器不会把它裁掉。
+   */
+  function SkillSelect({ opts, current, disabledFor, busy, title, onPick }) {
+    const [open, setOpen] = useState(false);
+    const currentLabel = (opts.find(([, value]) => value === current) || opts[0] || [""])[0];
+    return h("div", { className: "wc-select-wrap" },
+      h("button", {
+        type: "button",
+        className: "wc-select" + (busy ? " wc-busy" : "") + (open ? " wc-open" : ""),
+        disabled: busy,
+        title,
+        "aria-haspopup": "listbox",
+        "aria-expanded": open ? "true" : "false",
+        onClick: () => setOpen(!open),
+      },
+        h("span", { className: "wc-select-label" }, currentLabel),
+        h("span", { className: "wc-select-caret" + (open ? " wc-up" : "") })
+      ),
+      open
+        ? h("div", { className: "wc-menu", role: "listbox" },
+            opts.map(([label, value]) => h("button", {
+              key: value,
+              type: "button",
+              role: "option",
+              className: "wc-menu-item" + (value === current ? " wc-on" : ""),
+              disabled: disabledFor(value),
+              "aria-selected": value === current ? "true" : "false",
+              onClick: () => { setOpen(false); onPick(value); },
+            }, label)))
+        : null
+    );
+  }
+
   function Seg({ row, compact }) {
     const team = teamTouched(row);
     // 选中态必须落在 local：面板只写 settings.local.json，落在合并结果上会让点击「跟随」后按钮弹回。
@@ -866,23 +912,17 @@ export default function activate(ctx) {
     }
     const disabledFor = (value) =>
       row.busy || (value === "on" && !row.allowOn) || (value === "inherit" && followDead);
-    // 侧栏只有一行的宽度：技能有五档，摆成一排按钮会把名字挤没，改用下拉。
+    // 侧栏只有一行的宽度：技能有五档，摆成一排按钮会把名字挤没。
+    // 这里必须是自绘下拉——原生 <select> 会露出 Windows 系统控件的外观，
+    // 在宿主的界面里非常突兀。
     if (compact && opts.length > 3) {
       const current = opts.some(([, value]) => value === active) ? active : "inherit";
-      return h("select", {
-        className: "wc-select" + (row.busy ? " wc-busy" : ""),
-        disabled: row.busy,
+      return h(SkillSelect, {
+        opts, current, disabledFor,
+        busy: row.busy,
         title: "技能可见性：" + (SKILL_TIP[active] || ""),
-        value: current,
-        onChange: (e) => {
-          const value = e.target.value;
-          if (row.busy || value === current) return;
-          void apply(row, value);
-        },
-      },
-        opts.map(([label, value]) =>
-          h("option", { key: value, value, disabled: disabledFor(value) }, label))
-      );
+        onPick: (value) => { if (!row.busy && value !== current) void apply(row, value); },
+      });
     }
     return h("div", { className: "wc-seg" },
       opts.map(([label, value]) =>
