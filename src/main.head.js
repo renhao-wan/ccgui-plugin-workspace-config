@@ -116,6 +116,19 @@ const STYLE = `
 .wc-mem-md { min-width: 0; padding: 14px 16px; border: 1px solid rgba(127,127,127,.14); border-radius: 10px; font-size: 12.5px; line-height: 1.65; user-select: text; }
 .wc-mem-md > :first-child { margin-top: 0; }
 .wc-mem-md > :last-child { margin-bottom: 0; }
+/* 记忆页两栏各自滚动：正文再长，左侧文件列表也停在原地。
+   .wc-scroll-fixed 由中央视图在「记忆」类别下挂到滚动容器上。 */
+.wc-center-scroll.wc-scroll-fixed { overflow: hidden; display: flex; flex-direction: column; }
+.wc-scroll-fixed .wc-body { flex: 1; min-height: 0; }
+.wc-scroll-fixed .wc-center-layout { height: 100%; align-items: stretch; }
+.wc-scroll-fixed .wc-detail { min-height: 0; display: flex; flex-direction: column; }
+.wc-scroll-fixed .wc-mem { flex: 1; min-height: 0; }
+.wc-scroll-fixed .wc-mem-grid { flex: 1; min-height: 0; align-items: stretch; }
+.wc-scroll-fixed .wc-mem-list, .wc-scroll-fixed .wc-mem-detail { overflow-y: auto; overscroll-behavior: contain; }
+.wc-scroll-fixed .wc-mem-detail { padding-right: 8px; }
+.wc-mem-grid.wc-mem-grid-single { grid-template-columns: minmax(0, 1fr); }
+.wc-mem-grid-single .wc-mem-detail { padding-left: 0; border-left: 0; }
+.wc-mem-grid-single .wc-mem-body { max-width: 900px; }
 .wc-md-h1 { font-size: 16px; } .wc-md-h2 { font-size: 14px; } .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { font-size: 13px; }
 .wc-md-h1, .wc-md-h2, .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { margin: 14px 0 6px; font-weight: 600; }
 .wc-md-p { margin: 6px 0; }
@@ -136,6 +149,12 @@ const STYLE = `
   .wc-mem-grid { grid-template-columns: 1fr; }
   .wc-mem-detail { padding-left: 0; padding-top: 10px; border-left: 0; border-top: 1px solid rgba(127,127,127,.12); }
   .wc-mem-body { max-width: none; }
+  /* 窄屏一列排下来，各自滚动会把两段都压得很矮，退回整页滚动。 */
+  .wc-center-scroll.wc-scroll-fixed { display: block; overflow-y: auto; }
+  .wc-scroll-fixed .wc-center-layout { height: auto; }
+  .wc-scroll-fixed .wc-mem { height: auto; }
+  .wc-scroll-fixed .wc-mem-grid { flex: none; height: auto; }
+  .wc-scroll-fixed .wc-mem-list, .wc-scroll-fixed .wc-mem-detail { overflow: visible; padding-right: 0; }
 }
 /* 窄屏：导航翻到顶部做横向滚动条，详情独占一行 */
 @media (max-width: 880px) {
@@ -1340,6 +1359,8 @@ export default function activate(ctx) {
   function MemoryView({ s, onPick, onRefresh }) {
     const mem = s.mem;
     const current = s.memFile;
+    // 正文长的时候，左侧列表一直占着近 300px；允许收起，正文就能铺满宽度。
+    const [listOpen, setListOpen] = useState(true);
 
     if (!mem) {
       return h("div", { className: "wc-mem" },
@@ -1397,17 +1418,28 @@ export default function activate(ctx) {
         h("button", {
           type: "button",
           className: "wc-refresh",
+          disabled: !current,
+          title: current
+            ? (listOpen ? "收起文件列表，让正文占满宽度" : "重新显示文件列表")
+            : "先选一个文件",
+          onClick: () => setListOpen((v) => !v),
+        }, listOpen ? "收起列表" : "展开列表"),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
           disabled: s.memLoading,
           onClick: onRefresh,
         }, s.memLoading ? "读取中…" : "重新读取")
       ),
       s.memError ? h("p", { className: "wc-err" }, s.memError) : null,
-      h("div", { className: "wc-mem-grid" },
-        h("div", { className: "wc-mem-list" },
-          files.length === 0
-            ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
-            : files.map(fileItem)
-        ),
+      h("div", { className: "wc-mem-grid" + (listOpen ? "" : " wc-mem-grid-single") },
+        listOpen
+          ? h("div", { className: "wc-mem-list" },
+              files.length === 0
+                ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
+                : files.map(fileItem)
+            )
+          : null,
         h("div", { className: "wc-mem-detail" },
           s.memFileLoading ? h("p", { className: "wc-empty" }, "读取中…") : body
         )
@@ -1790,7 +1822,8 @@ export default function activate(ctx) {
       h("div", { className: "wc-page-fixed" },
         h(Body, { mode: "center", part: "head" })
       ),
-      h("div", { className: "wc-scroll wc-center-scroll" },
+      // 记忆页要在内部两栏各自滚动，所以这一层本身不能滚。
+      h("div", { className: "wc-scroll wc-center-scroll" + (s.activeKind === "memory" ? " wc-scroll-fixed" : "") },
         h(Body, { mode: "center", part: "list" })
       ),
       h(Toast, { note: s.note, error: s.error })

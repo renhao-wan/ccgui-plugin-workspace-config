@@ -1088,6 +1088,15 @@ fs.writeFileSync(localPath, JSON.stringify({
   assert.ok(memItems.length >= 3, "记忆列表应有自动记忆、项目与个人来源");
   assert.match(textOf(memItems[0]), /MEMORY\.md/, "索引文件应排在最前");
   assert.match(textOf(byClassAll(centerTree, "wc-mem")[0]), /只读/, "记忆页必须标明只读");
+  // 两栏各自滚动：外层容器在记忆页必须停止滚动，否则列表和正文还是一起走。
+  const memScroller = byClassAll(centerTree, "wc-center-scroll")[0];
+  assert.ok(memScroller, "中央视图找不到滚动容器");
+  assert.match(String(memScroller.props.className), /wc-scroll-fixed/,
+    "记忆页的中央外层应换成不滚动的壳");
+  const memScrollRule = (capturedCss.match(/\.wc-center-scroll\.wc-scroll-fixed\s*\{[^}]*\}/) || [""])[0];
+  assert.match(memScrollRule, /overflow:\s*hidden/, "记忆页外层容器必须停止滚动，把滚动交给两栏");
+  assert.match(capturedCss, /\.wc-scroll-fixed \.wc-mem-list[^{]*\{[^}]*overflow-y:\s*auto/,
+    "文件列表要自己滚动，不能和正文一起滚");
   const noteItem = memItems.find((n) => textOf(n).includes("alpha-note"));
   assert.ok(noteItem, "记忆列表缺少 alpha-note");
   noteItem.props.onClick();
@@ -1107,10 +1116,27 @@ fs.writeFileSync(localPath, JSON.stringify({
     "行内加粗应渲染成 strong");
   assert.match(textOf(byClassAll(centerTree, "wc-mem-path")[0] || ""), /alpha-note\.md$/,
     "正文里要给出可直接复制的完整路径");
+  // 正文长的时候列表一直占着近 300px：收起后正文独占一行，再点恢复。
+  const findBtn = (label) => findAll(centerTree, (n) => n && n.type === "button" && textOf(n) === label)[0];
+  assert.ok(findBtn("收起列表"), "记忆页缺少收起列表的按钮");
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "默认应显示文件列表");
+  findBtn("收起列表").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-mem-list").length, 0, "收起后文件列表应消失");
+  assert.equal(byClassAll(centerTree, "wc-mem-grid-single").length, 1, "收起后正文应独占一列");
+  assert.ok(findBtn("展开列表"), "收起后按钮应变成展开列表");
+  findBtn("展开列表").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "再次点击应恢复文件列表");
   // 回到配置类别：记忆内容必须整块消失，不能和开关列表叠在一起。
   byClassAll(centerTree, "wc-nav-item")[0].props.onClick();
   centerTree = R.renderKeep(Center, {});
   assert.equal(byClassAll(centerTree, "wc-mem").length, 0, "切回插件类别后记忆区应卸载");
+  assert.equal(
+    String((byClassAll(centerTree, "wc-center-scroll")[0] || { props: {} }).props.className || "").includes("wc-scroll-fixed"),
+    false,
+    "离开记忆页后中央外层应恢复普通滚动",
+  );
   assert.ok(byClassAll(centerTree, "wc-row").length > 0, "切回插件类别后列表应恢复");
 
   // 侧栏：页内页签固定在滚动区外，列表再长也不会把它顶走
