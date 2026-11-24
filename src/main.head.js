@@ -18,6 +18,8 @@ const SCRIPT_REL = "runtime/config-io.mjs";
 const SETTINGS_KEY = "workspace-config.settings.v1";
 const IO_TIMEOUT_MS = 20000;
 const SCAN_TIMEOUT_MS = 30000;
+// 自检会真的握手一个 server，比读写配置慢得多；留够余量免得进程还没起完就被掐。
+const PROBE_TIMEOUT_MS = 70000;
 
 // 反馈渠道。endpoint 必须与 manifest 的 network:<host> 逐字一致。
 const FEEDBACK_ENDPOINT = "https://ccgui-feedback.2653990378.workers.dev";
@@ -172,6 +174,13 @@ const STYLE = `
 .wc-appr-btn:hover { opacity: 1; }
 .wc-appr-btn:disabled { opacity: .3; cursor: default; }
 .wc-badge { flex: none; font-size: 11px; padding: 4px 9px; border-radius: 10px; background: rgba(127,127,127,.14); opacity: .8; }
+/* MCP 连接自检：和审批同一种朴素长相，只靠文字区分结果 */
+.wc-probe { display: flex; align-items: center; gap: 5px; }
+.wc-probe-dot { font-size: 10.5px; line-height: 16px; padding: 0 7px; border-radius: 999px; background: rgba(127,127,127,.12); opacity: .8; white-space: nowrap; cursor: default; }
+.wc-probe-connected { color: #2f9e44; opacity: 1; }
+.wc-probe-failed, .wc-probe-error, .wc-probe-timeout { color: #d9534f; opacity: 1; }
+.wc-probe-btn { font: inherit; font-size: 10.5px; padding: 1px 6px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; opacity: .6; white-space: nowrap; }
+.wc-probe-btn:hover { opacity: 1; }
 .wc-empty { margin: 10px 0; font-size: 12px; opacity: .5; }
 .wc-err { margin: 8px 0; color: #d9534f; white-space: pre-wrap; }
 .wc-note { margin: 8px 0; color: #2f9e44; }
@@ -193,9 +202,10 @@ const STYLE = `
 .wc-stat-num { font-size: 22px; font-weight: 600; line-height: 1.2; }
 .wc-stat-label { margin-top: 2px; font-size: 12px; opacity: .6; }
 .wc-toast { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 10; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
-.wc-toast-line { padding: 9px 12px 9px 14px; border-radius: 9px; font-size: 12px; line-height: 1.45; box-shadow: 0 8px 24px rgba(0,0,0,.24); background: rgba(28,28,30,.94); color: #fff; border-left: 3px solid transparent; }
-.wc-toast-ok { border-left-color: #37b24d; }
-.wc-toast-err { border-left-color: #ff6b6b; }
+/* 与列表里的提示同一套中性色，不再用深色块和彩色描边 */
+.wc-toast-line { padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; background: rgba(127,127,127,.16); color: inherit; }
+.wc-toast-ok { color: #2f9e44; }
+.wc-toast-err { color: #d9534f; }
 .wc-settings { padding: 4px 0; font-size: 13px; }
 .wc-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .wc-check input { width: 15px; height: 15px; }
@@ -266,7 +276,7 @@ const STYLE = `
 export default function activate(ctx) {
   const { createElement: h, useEffect, useState, useRef } = ctx.react;
 
-  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "" };
+  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "", probes: {} };
   const subs = new Set();
 
   // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
@@ -388,7 +398,9 @@ export default function activate(ctx) {
   async function refresh(ws) {
     if (!ws) return;
     const seq = ++scanSeq;
-    set({ loading: true, error: "" });
+    // 自检结果只对「扫描时的配置」成立；重新扫描就得作废，
+    // 否则改完审批后旧结论会一直挂在行上。
+    set({ loading: true, error: "", probes: {} });
     try {
       const data = await runIo(["scan", ws], SCAN_TIMEOUT_MS);
       if (seq !== scanSeq) return;
@@ -396,6 +408,30 @@ export default function activate(ctx) {
     } catch (err) {
       if (seq !== scanSeq) return;
       set({ loading: false, data: null, error: String((err && err.message) || err) });
+    }
+  }
+
+  /** 让 Claude Code 真的连一次这个 server。会启动进程，所以只能手动触发。 */
+  async function probeOne(row) {
+    if (!store.ws) return;
+    const key = row.id;
+    const prev = store.probes[key];
+    if (prev && prev.status === "loading") return;
+    set({ probes: Object.assign({}, store.probes, { [key]: { status: "loading" } }) });
+    try {
+      const res = await runIo(["probe", store.ws, row.id], PROBE_TIMEOUT_MS);
+      set({
+        probes: Object.assign({}, store.probes, {
+          [key]: { status: res.status, detail: res.detail || "", elapsedMs: res.elapsedMs || 0 },
+        }),
+      });
+    } catch (err) {
+      // 自检失败不等于 server 连不上（可能是脚本本身跑不起来），分开说。
+      set({
+        probes: Object.assign({}, store.probes, {
+          [key]: { status: "error", detail: String((err && err.message) || err), elapsedMs: 0 },
+        }),
+      });
     }
   }
 
@@ -553,7 +589,9 @@ export default function activate(ctx) {
     let allowOn = true;
     if (row.kind === "plugin") allowOn = Boolean(row.installed);
     else if (row.kind === "mcp") allowOn = Boolean(row.canEnable);
-    return Object.assign({}, row, { busy, allowOn });
+    // 自检结果按 server 名存，只有 MCP 行有。
+    const probe = row.kind === "mcp" ? store.probes[row.id] || null : null;
+    return Object.assign({}, row, { busy, allowOn, probe });
   }
 
   // sharedState / localState 由 scan 分别给出：前者是仓库里的 .claude/settings.json（团队层），
@@ -693,6 +731,55 @@ export default function activate(ctx) {
           void applyApproval(row, cycle);
         },
       }, busy ? "…" : (compact ? "" : "改为" + (APPROVAL_WORD[cycle] || cycle)))
+    );
+  }
+
+  /* ------------------------------------------------------------ MCP 连接自检 */
+
+  // 上面那套 blocked 是「照配置推演」，这里补的是「让 Claude Code 真连一次」。
+  // 推演讲不出命令不存在、启动即崩这类问题，只有实际握手才知道。
+  const PROBE_WORD = {
+    connected: "已连上",
+    failed: "连不上",
+    pending: "未批准",
+    disabled: "/mcp 已关闭",
+    timeout: "超时",
+    "no-cli": "无 CLI",
+    error: "自检失败",
+  };
+  // 自检结论和推演结论可能不一致，这本身就是要显示出来的信息。
+  const probeHint = (probe) => {
+    if (!probe) return "";
+    if (probe.status === "failed") return "Claude Code 尝试连接时失败" + (probe.detail ? "：" + probe.detail : "");
+    if (probe.status === "connected") return "Claude Code 已成功建立连接";
+    if (probe.status === "pending") return "Claude Code 认为它还没被批准，不会连接";
+    if (probe.status === "disabled") return "Claude Code 认为它在本项目被 /mcp 关掉了";
+    if (probe.status === "no-cli") return "本机找不到 claude 命令，无法实际检测";
+    if (probe.status === "timeout") return "自检超时，server 可能启动很慢或卡住";
+    return probe.detail || "自检没有得到可用结果";
+  };
+
+  function ProbeSeg({ row }) {
+    const probe = row.probe;
+    const loading = Boolean(probe && probe.status === "loading");
+    if (loading) {
+      return h("div", { className: "wc-probe" },
+        h("span", { className: "wc-probe-dot" }, "检测中…")
+      );
+    }
+    return h("div", { className: "wc-probe" },
+      probe
+        ? h("span", {
+            className: "wc-probe-dot wc-probe-" + probe.status,
+            title: probeHint(probe) + (probe.elapsedMs ? "（耗时 " + probe.elapsedMs + " ms）" : ""),
+          }, PROBE_WORD[probe.status] || probe.status)
+        : null,
+      h("button", {
+        type: "button",
+        className: "wc-probe-btn",
+        title: "让 Claude Code 真的连接一次试试。注意：这会启动该 server 的进程。",
+        onClick: () => { void probeOne(row); },
+      }, probe ? "重测" : "检测")
     );
   }
 
@@ -909,9 +996,14 @@ export default function activate(ctx) {
         : row.kind === "mcp" && row.projectDefined
           ? h("div", { className: "wc-row-actions" },
               h(Seg, { row: v, compact }),
-              h(ApprovalSeg, { row: v, compact })
+              h(ApprovalSeg, { row: v, compact }),
+              // 侧栏放不下三行控件，自检只给中央视图。
+              compact ? null : h(ProbeSeg, { row: v })
             )
-          : h(Seg, { row: v, compact })
+          : h("div", { className: "wc-row-actions" },
+              h(Seg, { row: v, compact }),
+              row.kind === "mcp" && !compact ? h(ProbeSeg, { row: v }) : null
+            )
       ),
       open && expandable ? h(Flow, { row }) : null
     );

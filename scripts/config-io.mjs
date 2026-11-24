@@ -8,12 +8,14 @@
  * 用法：
  *   node config-io.mjs scan <workspace>
  *   node config-io.mjs set  <workspace> <plugin|mcp|skill> <id> <inherit|on|off>
+ *   node config-io.mjs probe <workspace> <serverName>   ← 会真的启动 server
  * 输出：单行 JSON，ok=false 时附带 error。
  */
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   PROJECT_SETTINGS_REL,
   SHARED_SETTINGS_REL,
@@ -765,6 +767,72 @@ function setMany(ws, opsJson) {
   return { ok: true, file: localPath, applied, settings: next };
 }
 
+/* ---------------- MCP 连接自检（会真的启动 server） ---------------- */
+
+// scan 是「按配置推演会不会连上」，这里补的是「让 Claude Code 真的试一次」。
+// 两者会不一致，而这正是它存在的理由：推演讲不清的失败原因（命令不存在、
+// 启动即崩、握手超时）只有实际连一次才知道。
+//
+// 代价必须记住：**它真的会拉起 server 进程**，所以只能由用户手动触发，
+// 绝不能塞进刷新流程。
+/** server 名要交给 shell，先挡住能改变命令结构或越界的字符。 */
+function assertServerName(name) {
+  // 允许常见的 server 命名（含 scoped 包的 @ / : 与路径分隔），但不允许空白、
+  // 引号、分号、重定向、$ 和反引号——任何一个都能改写命令行。
+  if (typeof name !== "string" || !/^[A-Za-z0-9._:@/-]+$/.test(name)) {
+    throw new Error("server 名含有无法安全传给命令行的字符：" + String(name));
+  }
+  // 单独的 . / .. 会被当成路径，虽然这里只是拼命令，仍一并挡掉。
+  if (name === "." || name === "..") throw new Error("server 名不合法：" + name);
+}
+
+/** 把 `claude mcp get` 的输出翻成状态。纯函数，便于单测覆盖各分支。 */
+function parseProbeOutput(out) {
+  const lines = String(out || "").split(/\r?\n/);
+  const statusLine = lines.find((line) => /^\s*Status:/.test(line)) || "";
+  const issueLine = lines.find((line) => /^\s*Issue:/.test(line)) || "";
+  const detail = issueLine.replace(/^\s*Issue:\s*/, "").trim();
+
+  // 状态符号是 Claude Code 的输出契约；文字兜底一层，免得换了符号就全成 unknown。
+  let status = "unknown";
+  if (/^\s*Status:\s*✔/.test(statusLine) || /Connected/i.test(statusLine)) status = "connected";
+  else if (/^\s*Status:\s*✘/.test(statusLine) || /Failed to connect/i.test(statusLine)) status = "failed";
+  else if (/^\s*Status:\s*⏸/.test(statusLine) || /Pending approval/i.test(statusLine)) status = "pending";
+  else if (/^\s*Status:\s*⊘/.test(statusLine) || /Disabled for this project/i.test(statusLine)) status = "disabled";
+  // 整行都没有 Status 说明命令没跑起来（找不到 CLI 时就是这样）。
+  else if (!statusLine) status = "no-cli";
+
+  return { status, detail: detail || (status === "no-cli" ? "找不到 claude 命令或输出无法解析" : "") };
+}
+
+function probeMcp(ws, name) {
+  assertServerName(name);
+  const started = Date.now();
+  const r = spawnSync("claude mcp get " + name, {
+    cwd: ws,
+    encoding: "utf8",
+    timeout: 60000,
+    windowsHide: true,
+    // Windows 上 claude 是 .cmd 包装，不起 shell 找不到可执行文件。
+    shell: true,
+  });
+  const elapsedMs = Date.now() - started;
+
+  if (r.error) {
+    const code = r.error.code || "";
+    if (code === "ENOENT") {
+      return { ok: true, name, status: "no-cli", detail: "找不到 claude 命令", elapsedMs };
+    }
+    if (code === "ETIMEDOUT") {
+      return { ok: true, name, status: "timeout", detail: "60 秒内没有返回", elapsedMs };
+    }
+    return { ok: true, name, status: "error", detail: String(r.error.message || code), elapsedMs };
+  }
+
+  const parsed = parseProbeOutput(String(r.stdout || "") + "\n" + String(r.stderr || ""));
+  return { ok: true, name, status: parsed.status, detail: parsed.detail, elapsedMs };
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const action = argv[0];
@@ -775,8 +843,14 @@ function main() {
     process.stdout.write(JSON.stringify(setMany(ws, argv[2] || "[]")));
     return;
   }
+  if (action === "probe") {
+    if (!ws) throw new Error("用法：config-io.mjs probe <workspace> <serverName>");
+    if (!fs.existsSync(ws)) throw new Error("工作区不存在：" + ws);
+    process.stdout.write(JSON.stringify(probeMcp(ws, argv[2])));
+    return;
+  }
   const [, , kind, id, state] = argv;
-  if (!action || !ws) throw new Error("用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state> | memory <workspace> | memoryRead <workspace> <file>");
+  if (!action || !ws) throw new Error("用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state> | memory <workspace> | memoryRead <workspace> <file> | probe <workspace> <serverName>");
   if (!fs.existsSync(ws)) throw new Error("工作区不存在：" + ws);
   let result = null;
   if (action === "scan") result = scan(ws);

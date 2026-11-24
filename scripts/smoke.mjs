@@ -455,6 +455,68 @@ fs.writeFileSync(localPath, "{}");
   assert.equal(deniedScan.blocked.effectiveState, "off");
 }
 
+/* ------------------------------------------------------------ MCP 连接自检 */
+
+// 自检要真的调 `claude mcp get`，那既慢又会启动 server。冒烟用一个假 CLI
+// 顶替：真实 PATH 上放一个可执行脚本，按 server 名吐出 Claude Code 的固定输出。
+// 这样测的是「解析 + 状态映射」这段逻辑，而不是 Claude Code 本身。
+{
+  const probeWs = path.join(tmp, "probe-ws");
+  const fakeBin = path.join(tmp, "fake-bin");
+  fs.mkdirSync(path.join(probeWs, ".claude"), { recursive: true });
+  fs.mkdirSync(fakeBin, { recursive: true });
+
+  // 假 claude：根据最后一个参数决定输出，覆盖四种状态 + 一种无法识别。
+  const fakeSrc = [
+    "#!/usr/bin/env node",
+    "const name = process.argv[process.argv.length - 1];",
+    "const table = {",
+    '  ok: "  Status: ✔ Connected",',
+    '  broken: "  Status: ✘ Failed to connect\\n  Issue: CONNECTION_CLOSED: Connection closed",',
+    '  waiting: "  Status: ⏸ Pending approval (run `claude` to approve)",',
+    '  off: "  Status: ⊘ Disabled for this project (re-enable via /mcp)",',
+    '  weird: "  Status: ⚠ Something new",',
+    "};",
+    "if (!(name in table)) { process.stderr.write('No MCP server found'); process.exit(1); }",
+    "process.stdout.write('Some server:\\n' + table[name] + '\\n');",
+  ].join("\n");
+  const fakePath = path.join(fakeBin, "claude");
+  fs.writeFileSync(fakePath, fakeSrc, { mode: 0o755 });
+
+  // Windows 上 shell 找的是 .cmd；两种都放，跨平台都能跑。
+  fs.writeFileSync(path.join(fakeBin, "claude.cmd"), '@echo off\r\nnode "%~dp0claude" %*\r\n');
+
+  const probeEnv = Object.assign({}, env, {
+    PATH: fakeBin + path.delimiter + env.PATH,
+  });
+  const probeRun = (name) => {
+    const out = execFileSync(process.execPath, [script, "probe", probeWs, name], {
+      env: probeEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    return JSON.parse(out);
+  };
+
+  assert.equal(probeRun("ok").status, "connected");
+  const broken = probeRun("broken");
+  assert.equal(broken.status, "failed");
+  assert.match(broken.detail, /CONNECTION_CLOSED/, "失败原因要原样带出来");
+  assert.equal(probeRun("waiting").status, "pending");
+  assert.equal(probeRun("off").status, "disabled");
+  // 认不出的状态不能冒充成功。
+  assert.equal(probeRun("weird").status, "unknown");
+
+  // 名字来自 .mcp.json 的键，会被拼进 shell 命令——必须挡住能改写命令的字符。
+  for (const bad of ["a b", "x; calc.exe", "$(id)", "a|b", "a>b", "`id`", "a&b", "..", "."]) {
+    const res = runSoft(["probe", probeWs, bad]);
+    assert.equal(res.ok, false, "危险名字必须被拒绝：" + JSON.stringify(bad));
+    assert.match(String(res.error), /无法安全传给命令行|不合法/, "拒绝理由要说清楚：" + JSON.stringify(bad));
+  }
+  // 正常名字（含 scoped 包常见的 @ / : / . 与路径分隔）不能被误伤。
+  for (const good of ["tavily", "@scope/pkg", "a:b", "a.b", "a/b", "a-b_c"]) {
+    assert.doesNotThrow(() => probeRun(good), "合法名字被误拒：" + good);
+  }
+}
+
 
 // 仓库里的 .claude/settings.json（团队层）：面板只读，写入永远只落 local。
 fs.writeFileSync(
@@ -819,6 +881,37 @@ fs.writeFileSync(localPath, JSON.stringify({
     const tavilyRow = byClassAll(detailMcp, "wc-row").find((n) => textOf(n).includes("tavily"));
     assert.ok(tavilyRow, "MCP 列表缺少 tavily");
     assert.equal(byClassAll(tavilyRow, "wc-appr-dot").length, 0, "user 来源的 MCP 不该有审批控件");
+
+    // 自检控件：中央视图每个 MCP 行都有「检测」按钮，但还没有结果时不该显示状态。
+    const projProbeBtn = byClassAll(projRow, "wc-probe-btn")[0];
+    assert.ok(projProbeBtn, "MCP 行缺少自检按钮");
+    assert.equal(textOf(projProbeBtn), "检测", "未检测过时按钮应写「检测」");
+    assert.equal(byClassAll(projRow, "wc-probe-dot").length, 0, "还没检测过就不该显示自检结果");
+    // 按钮文案要提前说明会启动进程，不能让人以为只是查状态。
+    assert.match(String(projProbeBtn.props.title || ""), /会启动/, "自检按钮必须提示会启动 server 进程");
+    // user 来源同样能自检（它不参与审批，但连接状态一样会出问题）。
+    assert.ok(byClassAll(tavilyRow, "wc-probe-btn")[0], "user 来源的 MCP 也该能自检");
+
+    // 点自检：UI 段的 exec 打真实子进程，而这里没有 claude 可用，
+    // 结果应是 no-cli 而不是崩掉——这正是「找不到 CLI」该有的降级。
+    projProbeBtn.props.onClick();
+    let probeDot = null;
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      centerTree = R.renderKeep(Center, {});
+      const rowNow = byClassAll(byClassAll(centerTree, "wc-detail")[0], "wc-row")
+        .find((n) => textOf(n).includes("proj-one"));
+      probeDot = rowNow && byClassAll(rowNow, "wc-probe-dot")[0];
+      if (probeDot && !textOf(probeDot).includes("检测中")) break;
+    }
+    assert.ok(probeDot, "自检后行上没有出现结果");
+    assert.match(textOf(probeDot), /无 CLI|自检失败/, "没有 claude 可用时应如实降级，而不是报成功");
+    // 有结果后按钮改成「重测」。
+    const probeBtnAfter = byClassAll(
+      byClassAll(byClassAll(centerTree, "wc-detail")[0], "wc-row").find((n) => textOf(n).includes("proj-one")),
+      "wc-probe-btn",
+    )[0];
+    assert.equal(textOf(probeBtnAfter), "重测", "有结果后按钮应改为「重测」");
     // 点审批按钮会真的写盘（这里借 bridge 跑子进程）。
     btn.props.onClick();
     for (let i = 0; i < 40; i++) {

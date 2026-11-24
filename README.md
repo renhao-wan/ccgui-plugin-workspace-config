@@ -34,6 +34,7 @@ CC GUI 和 CC Switch 管理的是**全局**配置——写 `~/.claude/settings.j
 5. 插件改动点 `/reload-plugins` 生效；MCP 与技能下次会话生效
 6. 中央视图里点任意一行，展开「全局 → 团队配置 → 本地 →（审批）→ 最终」的生效链路
 7. 中央视图顶部的诊断区会列出残留覆盖、全局启用但未安装、团队层锁死、未批准的 `.mcp.json` server 等问题；残留项可一键清理
+8. MCP 行右侧的「检测」按钮会让 Claude Code 真的连一次这个 server，告诉你它到底连不连得上。**这会启动该 server 的进程**，所以只在手动点击时发生，不会随刷新自动跑
 
 ## 技能的四态
 
@@ -68,6 +69,17 @@ Claude Code 的 `skillOverrides` 不只有开和关：
 
 这两种情况下，行上的圆点会变灰，`title` 写成「生效：关（工作区未信任）」，行尾再挂一个说明徽标；诊断区同时给出对应提示（未信任时还有一条工作区级汇总，避免逐条刷屏）。
 
+### 推演不等于实测：「检测」按钮
+
+上面这些判断都是照着配置文件推出来的，推不出「命令写错了」「启动就崩了」「网络不通」这类问题。MCP 行右侧的「检测」按钮会调 `claude mcp get <name>`，让 Claude Code 真的握一次手，把结果标在行上：`已连上` / `连不上` / `未批准` / `/mcp 已关闭` / `超时` / `无 CLI`。失败原因（比如 `CONNECTION_CLOSED`）会原样保留在悬停提示里。
+
+两点需要注意：
+
+- **它会启动 server 进程**，所以只能手动触发，不参与「刷新」。一次检测通常零点几秒到十几秒，超时上限 70 秒。
+- 检测结论只对检测那一刻的配置成立。改动审批或开关后请重新检测；重新扫描会清空所有旧结果。
+
+自检结论和推演结论可能不一致——比如配置里写着已批准、也信任了，但 server 启动就崩——这本身就是要显示出来的信息。
+
 ## 诊断
 
 `settings.local.json` 里可能残留指向已卸载插件、已删除技能、已移除 MCP 的键。这些键在列表里看不到（列表只列现存资源），却仍然生效——重新安装同名资源时会突然变成禁用状态。诊断区把它们找出来，并可一键清除。`.mcp.json` 里删掉的 server 若仍占着审批名单，同样按残留列出。
@@ -94,8 +106,8 @@ Claude Code 的 `skillOverrides` 不只有开和关：
 ```
 main.js 内联 config-io 源码
   → documentStorage.writeTextAtomic("runtime/config-io.mjs", ...)
-  → bridge.invoke("plugin_exec_run", { bin: "node", args: [脚本, "scan"|"set", ...] })
-  → 脚本读改写 .claude/settings.local.json，输出 JSON
+  → bridge.invoke("plugin_exec_run", { bin: "node", args: [脚本, "scan"|"set"|"probe"|"memory"|"memoryRead", ...] })
+  → 脚本读改写 .claude/settings.local.json（或只读地跑一次 claude mcp get），输出 JSON
 ```
 
 `src/lib/model.mjs` 是纯函数层（状态读写、空键清理、生效态计算），单元测试直接 import。

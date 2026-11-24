@@ -110,7 +110,7 @@ main.js（单文件 ESM）
 
 运行时：
   documentStorage.writeTextAtomic("runtime/config-io.mjs", SCAN_SOURCE)
-  bridge.invoke("plugin_exec_run", { bin: "node", args: [脚本, "scan"|"set", ...] })
+  bridge.invoke("plugin_exec_run", { bin: "node", args: [脚本, "scan"|"set"|"probe"|"memory"|"memoryRead", ...] })
   脚本读改写 .claude/settings.local.json，stdout 输出单行 JSON
 ```
 
@@ -167,7 +167,7 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | `<ws>/.mcp.json` | project MCP；其审批结果在 `settings.local.json` 的三个 `*McpjsonServers` / `enableAllProjectMcpServers` 键里 |
 | `<ws>/.claude/settings.json` | 团队配置（只读，用于展示冲突） |
 | `<ws>/.claude/settings.local.json` | 读写目标 |
-| `~/.claude/projects/<slug>/memory/*.md` | 自动记忆（只读浏览，见 6.4） |
+| `~/.claude/projects/<slug>/memory/*.md` | 自动记忆（只读浏览，见 6.5） |
 
 ## 6. UI
 
@@ -217,7 +217,38 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 
 `blocked` 非 `null` 且不是「待审批 / 已拒绝」时，行尾在审批徽标旁再挂一个灰徽标（`工作区未信任` / `/mcp 已关闭`），链路下方追加一句说明；灰点的 `title` 也会写成 `生效：关（工作区未信任）` 这种带原因的形式，避免用户以为开关坏了。
 
-### 6.4 记忆浏览（只读）
+### 6.4 MCP 连接自检
+
+`blocked` 那一套是**照配置推演**：它知道有没有被拒绝、有没有批准、工作区信不信任、`/mcp` 有没有关，但不知道 server 的命令写错了、启动即崩、端口被占、网络不通。这些只有真的握一次手才知道。
+
+中央视图的 MCP 行右侧有「检测」按钮，点一次走一个新动作：
+
+```
+node config-io.mjs probe <workspace> <serverName>
+```
+
+内部是 `claude mcp get <name>`（带 `shell: true`，Windows 上 claude 是 `.cmd` 包装），单条实测 0.5–1.6 秒，超时上限 60 秒。输出按 Claude Code 的 Status 符号翻译：
+
+| 输出 | status | 界面 |
+|---|---|---|
+| `Status: ✔ Connected` | `connected` | 已连上 |
+| `Status: ✘ Failed to connect` + `Issue: …` | `failed` | 连不上（原因原样保留在 title） |
+| `Status: ⏸ Pending approval…` | `pending` | 未批准（未信任时的已批准也是这个） |
+| `Status: ⊘ Disabled for this project…` | `disabled` | `/mcp` 已关闭 |
+| 找不到命令 | `no-cli` | 无 CLI |
+| 超时 / 其余 `Status:` | `timeout` / `unknown` | 超时 / 原样回报 |
+
+**副作用**：这个动作会真的启动该 server 的进程，所以只能由用户手动点击触发，**绝不参与 `refresh`**，否则每次刷新都会把所有 server 拉起来一遍（`claude mcp list` 就是这么慢的——实测 32 秒）。
+
+**生命周期**：结果按 server 名存在 `store.probes`，只对检测那一刻的配置成立。重新扫描（`refresh`）会清空全部结果，避免改完审批后旧结论一直挂在行上。
+
+**与推演的关系**：两者可以不一致，而且不一致本身就是信息。配置写着已批准、工作区也信任，但 server 启动就崩——`blocked` 是 `null`，自检却是 `failed`。界面上两个结论并排显示，不做谁覆盖谁。
+
+**命令注入**：server 名来自 `.mcp.json` 的键，是任意字符串，还要拼进 shell 命令。`assertServerName` 只放行 `[A-Za-z0-9._:@/-]+`，并单独挡掉 `.` 与 `..`（会被当成路径）。空白、引号、`;`、`|`、`&`、`>`、`$`、反引号一律拒绝并给出中文理由。冒烟覆盖 9 个危险名与 6 个合法名。
+
+侧栏（`compact`）不放自检控件——一行已经容纳开关和审批，再加一排会挤。
+
+### 6.5 记忆浏览（只读）
 
 中央页签左侧导航第 4 项，与三个开关类别用分隔线隔开——它是「看」而不是「改」。
 
@@ -249,8 +280,9 @@ node config-io.mjs memoryRead <workspace> <path> 读正文
 5. 共享包 `validate-core` 未覆盖 `registerPanelTab` 的权限检测，产生一条固定 warn
 6. 远程工作区（`host:workspace:remote`）下 `exec:node` 的执行位置未验证
 7. 工作区信任与 `/mcp` 开关存在 `~/.claude.json`，本插件只读不写：能解释「为什么批准了没连上」，但不能替用户在面板里翻这两个开关（写全局违反本插件的边界）
+8. MCP 连接自检要启动 server 进程，因此只能手动触发；一次只测一个 server，没有「全部检测」（那等价于 `claude mcp list`，实测 32 秒）
 
 ## 8. 测试
 
 - 18 条纯逻辑单测：三态读写、技能四态往返与 `unknown` 只读、`.mcp.json` 审批（拒绝优先、名单互斥、总开关语义）、`mcpBlockReason` 五道闸的优先级与信任只挡批准侧、空键清理、保留非托管键、生效态
-- 255 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；另含坏 JSON 文件拒绝写入、审批名单残留可清理、`CLAUDE_CONFIG_DIR` 生效、frontmatter `name` 覆盖目录名四组用例；**信任层与 `/mcp` 开关**一组覆盖「未信任 + 已批准 → untrusted / off / 有 warn 诊断」「已信任 → 连上」「`/mcp` 关闭 → runtime-disabled」「拒绝不受信任影响」「全局禁用压过一切」「汇总 info 只出一条」；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、**未信任时灰点 + 徽标 + title 三处都要说出来**、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写
+- 293 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；另含坏 JSON 文件拒绝写入、审批名单残留可清理、`CLAUDE_CONFIG_DIR` 生效、frontmatter `name` 覆盖目录名四组用例；**信任层与 `/mcp` 开关**一组覆盖「未信任 + 已批准 → untrusted / off / 有 warn 诊断」「已信任 → 连上」「`/mcp` 关闭 → runtime-disabled」「拒绝不受信任影响」「全局禁用压过一切」「汇总 info 只出一条」；**MCP 连接自检**一组用假 CLI（`fake-bin/claude` + `claude.cmd`）覆盖五种 Status 输出与无法识别的状态，并用 9 个危险 server 名验证命令注入防护、6 个合法名确认不误伤；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、**未信任时灰点 + 徽标 + title 三处都要说出来**、诊断识别与清理、生效链路展开、自检按钮文案与「无 CLI 时如实降级、有结果后改口重测」、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写

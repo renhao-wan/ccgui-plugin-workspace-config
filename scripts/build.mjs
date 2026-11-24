@@ -74,7 +74,10 @@ const libSource = model + "\n" + sharedChunks.join("\n");
 
 let io = fs.readFileSync(IO, "utf8");
 io = io.replace(/^#!.*\r?\n/, "");
-io = io.replace(/^import\s*\{[\s\S]*?\}\s*from\s*["']\.\.\/src\/lib\/model\.mjs["'];?[ \t]*\r?\n/m, "");
+// 只剥指向 model 的那一条。这里必须用 [^}] 而不是 [\s\S]——后者会从任意
+// `import {` 一路吃到 model 的 `}`，把夹在中间的 node 内置 import（如
+// child_process）一起吞掉，落盘脚本就会报「xxx is not defined」。
+io = io.replace(/^import\s*\{[^}]*\}\s*from\s*["']\.\.\/src\/lib\/model\.mjs["'];?[ \t]*\r?\n/m, "");
 if (/from\s*["']\.\.\/src\/lib\/model\.mjs["']/.test(io)) {
   throw new Error("config-io.mjs 里 model 的 import 没剥干净");
 }
