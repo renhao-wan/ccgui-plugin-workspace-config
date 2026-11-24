@@ -783,6 +783,13 @@ fs.writeFileSync(localPath, JSON.stringify({
     const currentItem = menuItems.find((n) => String(n.props.className || "").split(/\s+/).includes("wc-on"));
     assert.ok(currentItem, "下拉里当前档位没有高亮");
     assert.equal(textOf(currentItem), "仅名称", "高亮的应是当前值 name-only");
+    // 「仅名称 / 仅手动」这两个词不悬停说明看不懂，菜单项必须带完整解释。
+    const nameOnlyItem = menuItems.find((n) => textOf(n) === "仅名称");
+    assert.match(String(nameOnlyItem && nameOnlyItem.props.title || ""), /描述/,
+      "「仅名称」的菜单项要说明省掉描述");
+    const manualItem = menuItems.find((n) => textOf(n) === "仅手动");
+    assert.match(String(manualItem && manualItem.props.title || ""), /隐藏/,
+      "「仅手动」的菜单项要说明对 Claude 隐藏");
     assert.ok(!textOf(tree).includes("undefined"), "侧栏技能下拉文案里出现了 undefined");
     byClassAll(rowOpen, "wc-select")[0].props.onClick();
     tree = R.renderKeep(Panel, { workspacePath: ws });

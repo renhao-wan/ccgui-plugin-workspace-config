@@ -868,6 +868,10 @@ export default function activate(ctx) {
               role: "option",
               className: "wc-menu-item" + (value === current ? " wc-on" : ""),
               disabled: disabledFor(value),
+              // 「仅名称 / 仅手动」不看说明很难懂，悬停要给出完整含义。
+              title: value === "inherit"
+                ? "不写项目配置，沿用全局或团队配置"
+                : (SKILL_TIP[value] || undefined),
               "aria-selected": value === current ? "true" : "false",
               onClick: () => { setOpen(false); onPick(value); },
             }, label)))
