@@ -24,8 +24,9 @@ const require = createRequire(import.meta.url);
 const LIB_MARK = "/*__LIB_SOURCE__*/";
 const SCAN_MARK = "/*__SCAN_SOURCE__*/";
 
-// 顺序即内联顺序：feedback-ui 依赖 feedback，feedback-net 依赖 feedback。
-const SHARED_LIBS = ["feedback", "feedback-net", "feedback-ui"];
+// 顺序即内联顺序：feedback-ui 依赖 feedback，feedback-net 依赖 feedback；
+// markdown-view 依赖 markdown。记忆视图用它渲染只读的 Markdown 正文。
+const SHARED_LIBS = ["feedback", "feedback-net", "feedback-ui", "markdown", "markdown-view"];
 
 const stripExports = (src) =>
   src.replace(/^export\s+(?=(?:function|const|let|var|class)\s)/gm, "");

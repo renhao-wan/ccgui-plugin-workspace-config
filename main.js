@@ -862,8 +862,453 @@ function useFeedbackForm(R, opts) {
   };
 }
 
+// ---- ccgui-plugin-shared/markdown.mjs ----
+/**
+ * 解读正文用的 Markdown 子集解析。纯函数，输出的是「节点描述」而不是
+ * HTML —— 渲染端自己把它们变成元素，避免把模型的输出当 HTML 执行。
+ *
+ * 覆盖模型最常写的那几种：标题、段落、有序/无序列表（含缩进层级）、
+ * GFM 表格、代码块、行内代码、粗体、斜体、删除线、链接、引用、分隔线。
+ *
+ * 流式输入的容错是硬要求：解读是一个字一个字推过来的，任何时刻都可能停在
+ * `**粗`、`| a | b`（分隔行还没来）、``` 未闭合这种半截状态。所以：
+ * - 未闭合的行内标记按原文输出，不吞字符；
+ * - 未闭合的代码块一直吃到末尾；
+ * - 没有分隔行的表格行当普通段落。
+ */
 
-const SCAN_SOURCE = "/* 三态模型：项目级配置只表达「跟随全局 / 启用 / 禁用」，不碰全局文件。\n * 纯函数，浏览器与 node 都能跑；写操作一律返回新对象。 */\n\nconst PROJECT_SETTINGS_REL = \".claude/settings.local.json\";\nconst SHARED_SETTINGS_REL = \".claude/settings.json\";\n\nconst TRI_STATES = [\"inherit\", \"on\", \"off\"];\n// MCP 只有 denylist 可写：项目级能禁用，不能解除全局的禁用。\nconst MCP_STATES = [\"inherit\", \"off\"];\n\nconst has = (obj, key) =>\n  obj !== null && typeof obj === \"object\" && Object.prototype.hasOwnProperty.call(obj, key);\n\n/** settings 是 JSON 文档，深拷贝用 JSON 往返即可；不依赖 structuredClone。 */\nfunction cloneSettings(settings) {\n  return settings && typeof settings === \"object\" ? JSON.parse(JSON.stringify(settings)) : {};\n}\n\n/** 空键不落盘：面板把某栏全部改回「跟随全局」时，文件里不该留下空对象。 */\nfunction prune(settings) {\n  const next = cloneSettings(settings);\n  if (next.enabledPlugins && Object.keys(next.enabledPlugins).length === 0) delete next.enabledPlugins;\n  if (Array.isArray(next.deniedMcpServers) && next.deniedMcpServers.length === 0) delete next.deniedMcpServers;\n  if (next.skillOverrides && Object.keys(next.skillOverrides).length === 0) delete next.skillOverrides;\n  return next;\n}\n\nfunction assertState(state, allowed, kind) {\n  if (!allowed.includes(state)) {\n    throw new Error(`${kind} 不支持的状态：${state}（允许 ${allowed.join(\" / \")}）`);\n  }\n}\n\n/* ------------------------------------------------------------ plugin */\n\nfunction getPluginState(project, id) {\n  if (!has(project.enabledPlugins, id)) return \"inherit\";\n  return project.enabledPlugins[id] === false ? \"off\" : \"on\";\n}\n\nfunction setPluginState(project, id, state) {\n  assertState(state, TRI_STATES, \"plugin\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.enabledPlugins, id)) delete next.enabledPlugins[id];\n  } else {\n    next.enabledPlugins = { ...(next.enabledPlugins || {}), [id]: state === \"on\" };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ mcp */\n\nfunction getMcpState(project, serverName) {\n  const list = project.deniedMcpServers;\n  if (!Array.isArray(list)) return \"inherit\";\n  return list.some((entry) => entry && entry.serverName === serverName) ? \"off\" : \"inherit\";\n}\n\n/** 只增删 serverName 条目；serverCommand / serverUrl 条目原样保留。 */\nfunction setMcpState(project, serverName, state) {\n  if (state === \"on\") {\n    throw new Error(\"MCP 项目级无法显式启用：全局已禁用时不受项目控制，请改用 inherit\");\n  }\n  assertState(state, MCP_STATES, \"mcp\");\n  const next = cloneSettings(project);\n  const list = Array.isArray(next.deniedMcpServers) ? next.deniedMcpServers.slice() : [];\n  const filtered = list.filter((entry) => !(entry && entry.serverName === serverName));\n  if (state === \"off\") filtered.push({ serverName });\n  next.deniedMcpServers = filtered;\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ skill */\n\nfunction getSkillState(project, name) {\n  if (!has(project.skillOverrides, name)) return \"inherit\";\n  return project.skillOverrides[name] === \"off\" ? \"off\" : \"on\";\n}\n\nfunction setSkillState(project, name, state) {\n  assertState(state, TRI_STATES, \"skill\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.skillOverrides, name)) delete next.skillOverrides[name];\n  } else {\n    next.skillOverrides = { ...(next.skillOverrides || {}), [name]: state };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ 展示用 */\n\n/** 项目覆盖了多少项；panel tab 的徽标数字。 */\nfunction overrideCount(project) {\n  const plugins = project.enabledPlugins ? Object.keys(project.enabledPlugins).length : 0;\n  const mcp = Array.isArray(project.deniedMcpServers)\n    ? project.deniedMcpServers.filter((entry) => entry && entry.serverName).length\n    : 0;\n  const skills = project.skillOverrides ? Object.keys(project.skillOverrides).length : 0;\n  return plugins + mcp + skills;\n}\n\n/** 项目态优先；inherit 时回落到全局态。 */\nfunction effectiveState(projectState, globalState) {\n  if (projectState && projectState !== \"inherit\") return projectState;\n  return globalState || \"unknown\";\n}\n\n/* 子进程：读写项目级 Claude Code 配置。\n *\n * 插件本体拿不到文件系统，只能把这份脚本落盘后经 exec:node 执行。\n * 构建时 scripts/build.mjs 会把 src/lib/model.mjs 的源码内联进来，\n * 所以这里唯一允许的兄弟 import 是 model；其余只能用 node 内置模块。\n *\n * 用法：\n *   node config-io.mjs scan <workspace>\n *   node config-io.mjs set  <workspace> <plugin|mcp|skill> <id> <inherit|on|off>\n * 输出：单行 JSON，ok=false 时附带 error。\n */\n\nimport fs from \"node:fs\";\nimport os from \"node:os\";\nimport path from \"node:path\";\n\nconst HOME = process.env.USERPROFILE || process.env.HOME || os.homedir();\nconst CLAUDE_DIR = path.join(HOME, \".claude\");\nconst CLAUDE_JSON = path.join(HOME, \".claude.json\");\n\nfunction readJson(file) {\n  try {\n    let text = fs.readFileSync(file, \"utf8\");\n    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);\n    return JSON.parse(text);\n  } catch {\n    return null;\n  }\n}\n\nfunction writeJsonAtomic(file, data) {\n  fs.mkdirSync(path.dirname(file), { recursive: true });\n  const tmp = file + \".tmp-\" + process.pid;\n  const body = JSON.stringify(data, null, 2) + \"\\n\";\n  fs.writeFileSync(tmp, body, \"utf8\");\n  fs.renameSync(tmp, file);\n}\n\nconst norm = (p) => String(p || \"\").replace(/\\\\/g, \"/\").replace(/\\/+$/, \"\").toLowerCase();\n\nfunction findProjectEntry(config, ws) {\n  const projects = (config && config.projects) || {};\n  const target = norm(ws);\n  const key = Object.keys(projects).find((k) => norm(k) === target);\n  return key ? projects[key] : null;\n}\n\nfunction listSkillDirs(root, source, plugin) {\n  const out = [];\n  let entries = [];\n  try {\n    entries = fs.readdirSync(root, { withFileTypes: true });\n  } catch {\n    return out;\n  }\n  for (const entry of entries) {\n    if (!entry.isDirectory()) continue;\n    const md = path.join(root, entry.name, \"SKILL.md\");\n    if (!fs.existsSync(md)) continue;\n    out.push({ name: entry.name, source, plugin: plugin || null, path: md, description: readSkillDescription(md) });\n  }\n  return out;\n}\n\nfunction installedPlugins() {\n  const raw = readJson(path.join(CLAUDE_DIR, \"plugins\", \"installed_plugins.json\"));\n  const map = {};\n  const plugins = (raw && raw.plugins) || {};\n  for (const [id, list] of Object.entries(plugins)) {\n    if (!Array.isArray(list) || list.length === 0) continue;\n    const pick = list.find((e) => e && e.scope === \"user\") || list[0];\n    map[id] = {\n      installPath: pick && pick.installPath ? pick.installPath : \"\",\n      scopes: list.map((e) => e && e.scope).filter(Boolean),\n    };\n  }\n  return map;\n}\n\n/** 插件 .mcp.json 有两种写法：{ mcpServers: { name: cfg } } 和扁平的 { name: cfg }。 */\nfunction pluginServers(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return {};\n  const wrapped = cfg.mcpServers || cfg.servers;\n  if (wrapped && typeof wrapped === \"object\") return wrapped;\n  const out = {};\n  for (const [key, value] of Object.entries(cfg)) {\n    if (value && typeof value === \"object\"\n      && (\"command\" in value || \"url\" in value || \"type\" in value)) {\n      out[key] = value;\n    }\n  }\n  return out;\n}\n\n/** 插件描述：优先 .claude-plugin/plugin.json，其次根目录的 plugin.json / manifest.json。 */\nfunction pluginDescription(dir) {\n  if (!dir) return \"\";\n  for (const rel of [\".claude-plugin/plugin.json\", \"plugin.json\", \"manifest.json\"]) {\n    const cfg = readJson(path.join(dir, rel));\n    if (cfg && typeof cfg.description === \"string\" && cfg.description.trim()) {\n      return cfg.description.trim();\n    }\n  }\n  return \"\";\n}\n\n/** SKILL.md frontmatter 里的 description；只读前 50 行。 */\nfunction readSkillDescription(file) {\n  try {\n    const lines = fs.readFileSync(file, \"utf8\").split(/\\r?\\n/).slice(0, 50);\n    if (!lines.length || lines[0].trim() !== \"---\") return \"\";\n    let collecting = false;\n    const block = [];\n    for (let i = 1; i < lines.length; i++) {\n      const line = lines[i];\n      if (line.trim() === \"---\") break;\n      const match = /^description:\\s*(.*)$/.exec(line);\n      if (match) {\n        const value = match[1].trim();\n        if (/^[|>][-+]?$/.test(value)) { collecting = true; continue; }\n        return value.replace(/^[\"']|[\"']$/g, \"\").trim();\n      }\n      if (collecting) {\n        if (/^\\s+\\S/.test(line)) block.push(line.trim());\n        else break;\n      }\n    }\n    return block.join(\" \").trim();\n  } catch {\n    return \"\";\n  }\n}\n\nfunction mcpDescription(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return \"\";\n  if (typeof cfg.url === \"string\") return cfg.url;\n  if (typeof cfg.command === \"string\") {\n    const args = Array.isArray(cfg.args) ? \" \" + cfg.args.join(\" \") : \"\";\n    return (cfg.command + args).trim();\n  }\n  return \"\";\n}\n\nfunction scan(ws) {\n  const globalSettings = readJson(path.join(CLAUDE_DIR, \"settings.json\")) || {};\n  const globalConfig = readJson(CLAUDE_JSON) || {};\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const sharedPath = path.join(ws, SHARED_SETTINGS_REL);\n  const local = readJson(localPath) || {};\n  const shared = readJson(sharedPath) || {};\n\n  // 项目层：local 压过 shared；面板只写 local。\n  const projectLayer = Object.assign({}, shared, local);\n  for (const key of [\"enabledPlugins\", \"skillOverrides\"]) {\n    if (shared[key] || local[key]) {\n      projectLayer[key] = Object.assign({}, shared[key] || {}, local[key] || {});\n    }\n  }\n  if (Array.isArray(shared.deniedMcpServers) || Array.isArray(local.deniedMcpServers)) {\n    projectLayer.deniedMcpServers = [\n      ...(Array.isArray(shared.deniedMcpServers) ? shared.deniedMcpServers : []),\n      ...(Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []),\n    ];\n  }\n\n  /* ---------------- plugins ---------------- */\n\n  const installed = installedPlugins();\n  const pluginIds = new Set(Object.keys(globalSettings.enabledPlugins || {}));\n  for (const id of Object.keys(installed)) pluginIds.add(id);\n\n  const plugins = [];\n  for (const id of [...pluginIds].sort()) {\n    const at = id.lastIndexOf(\"@\");\n    const name = at > 0 ? id.slice(0, at) : id;\n    const marketplace = at > 0 ? id.slice(at + 1) : \"\";\n    const enabled = globalSettings.enabledPlugins && globalSettings.enabledPlugins[id];\n    const globalState = enabled === false ? \"off\" : enabled === true ? \"on\" : \"unknown\";\n    const projectState = getPluginState(projectLayer, id);\n    plugins.push({\n      kind: \"plugin\",\n      id,\n      name,\n      marketplace,\n      installed: Boolean(installed[id]),\n      installPath: installed[id] ? installed[id].installPath : \"\",\n      description: installed[id] ? pluginDescription(installed[id].installPath) : \"\",\n      globalState,\n      projectState,\n      // 面板只能写 local；shared 是被仓库共享的团队配置，单独列出以便界面说明「跟随」会落到哪一层。\n      localState: getPluginState(local, id),\n      sharedState: getPluginState(shared, id),\n      effectiveState: effectiveState(projectState, globalState),\n    });\n  }\n\n  /* ---------------- mcp ---------------- */\n\n  const userMcp = globalConfig.mcpServers || {};\n  const localMcp = (findProjectEntry(globalConfig, ws) || {}).mcpServers || {};\n  const projectMcp = (readJson(path.join(ws, \".mcp.json\")) || {}).mcpServers || {};\n\n  // 插件自带的 MCP：plugin 包里的 .mcp.json，同样能被 deniedMcpServers 拦住。\n  const pluginMcp = {};\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const cfg = readJson(path.join(info.installPath, \".mcp.json\"));\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    for (const [name, value] of Object.entries(pluginServers(cfg))) {\n      if (!(name in pluginMcp)) pluginMcp[name] = { plugin: pluginName, config: value };\n    }\n  }\n\n  const mcpNames = new Set([\n    ...Object.keys(userMcp),\n    ...Object.keys(localMcp),\n    ...Object.keys(projectMcp),\n    ...Object.keys(pluginMcp),\n  ]);\n\n  const globalDenied = Array.isArray(globalSettings.deniedMcpServers)\n    ? globalSettings.deniedMcpServers\n    : [];\n\n  const mcp = [...mcpNames].sort().map((name) => {\n    const scopes = [];\n    if (localMcp[name]) scopes.push(\"local\");\n    if (projectMcp[name]) scopes.push(\"project\");\n    if (userMcp[name]) scopes.push(\"user\");\n    if (pluginMcp[name]) scopes.push(\"plugin\");\n    const deniedGlobally = globalDenied.some((e) => e && e.serverName === name);\n    // local > project > user > plugin 是 Claude Code 的生效顺序\n    const scope = scopes[0] || \"user\";\n    const pluginEntry = pluginMcp[name];\n    const config = localMcp[name] || projectMcp[name] || userMcp[name]\n      || (pluginEntry && pluginEntry.config) || null;\n    const projectState = getMcpState(projectLayer, name);\n    const globalState = deniedGlobally ? \"off\" : \"on\";\n    return {\n      kind: \"mcp\",\n      id: name,\n      name,\n      scope,\n      scopes,\n      plugin: pluginEntry ? pluginEntry.plugin : null,\n      description: mcpDescription(config),\n      globalState,\n      projectState,\n      localState: getMcpState(local, name),\n      sharedState: getMcpState(shared, name),\n      canEnable: !deniedGlobally,\n      effectiveState: deniedGlobally ? \"off\" : effectiveState(projectState, \"on\"),\n    };\n  });\n\n  /* ---------------- skills ---------------- */\n\n  const skills = [];\n  skills.push(...listSkillDirs(path.join(CLAUDE_DIR, \"skills\"), \"personal\"));\n  skills.push(...listSkillDirs(path.join(ws, \".claude\", \"skills\"), \"project\"));\n\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    skills.push(...listSkillDirs(path.join(info.installPath, \"skills\"), \"plugin\", pluginName));\n  }\n\n  const globalOverrides = globalSettings.skillOverrides || {};\n  const seen = new Map();\n  const skillRows = skills.map((s) => {\n    const globalRaw = globalOverrides[s.name];\n    const globalState = globalRaw === \"off\" ? \"off\" : \"on\";\n    const projectState = getSkillState(projectLayer, s.name);\n    const row = {\n      kind: \"skill\",\n      id: s.name,\n      name: s.name,\n      source: s.source,\n      plugin: s.plugin,\n      description: s.description || \"\",\n      globalState,\n      projectState,\n      localState: getSkillState(local, s.name),\n      sharedState: getSkillState(shared, s.name),\n      effectiveState: effectiveState(projectState, globalState),\n      controllable: s.source !== \"plugin\",\n    };\n    const key = s.name;\n    if (!seen.has(key)) seen.set(key, []);\n    seen.get(key).push(s.source);\n    return row;\n  });\n\n  for (const row of skillRows) {\n    const sources = seen.get(row.name) || [];\n    row.shadowed = row.source === \"personal\" && sources.includes(\"project\");\n    if (row.controllable && sources.length > 1) {\n      row.effectiveSource = sources.includes(\"personal\") ? \"personal\" : \"project\";\n    } else if (!row.controllable) {\n      row.effectiveSource = \"plugin\";\n    } else {\n      row.effectiveSource = row.source;\n    }\n  }\n\n  /* ---------------- diagnostics ---------------- */\n\n  // 面板只列「当前存在的资源」，所以 local 里指向已消失资源的键会完全没有入口。\n  // 这里把它们找出来：stale 项可以一键清掉，其余只提示原因。\n  const diagnostics = [];\n  const seenDiag = new Set();\n  // 同名技能可能被多个来源列出（个人版与项目版、或多个插件共用 installPath），\n  // 诊断只该报一次。\n  const diag = (level, kind, id, name, message, fixable) => {\n    const key = level + \":\" + kind + \":\" + id;\n    if (seenDiag.has(key)) return;\n    seenDiag.add(key);\n    diagnostics.push({ level, kind, id, name, message, fixable: Boolean(fixable) });\n  };\n\n  const knownPlugins = new Set(plugins.map((p) => p.id));\n  for (const id of Object.keys(local.enabledPlugins || {})) {\n    if (!knownPlugins.has(id)) diag(\"stale\", \"plugin\", id, id, \"插件已不存在，本地仍保留开关\", true);\n  }\n  for (const p of plugins) {\n    if (!p.installed && p.globalState === \"on\") {\n      diag(\"warn\", \"plugin\", p.id, p.name, \"全局启用但本机未安装\", false);\n    }\n  }\n\n  const knownSkills = new Set(skillRows.map((r) => r.name));\n  for (const name of Object.keys(local.skillOverrides || {})) {\n    if (!knownSkills.has(name)) diag(\"stale\", \"skill\", name, name, \"技能已不存在，本地仍保留开关\", true);\n  }\n  for (const r of skillRows) {\n    const localTouched = Object.prototype.hasOwnProperty.call(local.skillOverrides || {}, r.name);\n    if (r.shadowed) diag(\"info\", \"skill\", r.id, r.name, \"项目版本被同名个人技能遮蔽\", false);\n    if (r.controllable === false && localTouched) {\n      diag(\"warn\", \"skill\", r.id, r.name, \"插件提供的技能不受本地开关控制\", false);\n    }\n  }\n\n  const knownMcp = new Set(mcpNames);\n  for (const entry of Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []) {\n    if (entry && entry.serverName && !knownMcp.has(entry.serverName)) {\n      diag(\"stale\", \"mcp\", entry.serverName, entry.serverName, \"MCP 已不存在，本地仍保留禁用\", true);\n    }\n  }\n  for (const row of mcp) {\n    if (row.sharedState === \"off\") {\n      diag(\"warn\", \"mcp\", row.id, row.name, \"团队配置已禁用，本地无法解除\", false);\n    }\n  }\n\n  return {\n    ok: true,\n    workspace: ws,\n    files: { local: localPath, shared: sharedPath },\n    pluginCount: plugins.length,\n    plugins,\n    mcp,\n    skills: skillRows,\n    diagnostics,\n  };\n}\n\nfunction set(ws, kind, id, state) {\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const current = readJson(localPath) || {};\n  let next;\n  if (kind === \"plugin\") next = setPluginState(current, id, state);\n  else if (kind === \"mcp\") next = setMcpState(current, id, state);\n  else if (kind === \"skill\") next = setSkillState(current, id, state);\n  else throw new Error(\"未知类型：\" + kind);\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, settings: next };\n}\n\n/** 一次写完多条：同类型共用一个文件，避免每行起一次子进程。 */\nfunction setMany(ws, opsJson) {\n  let ops;\n  try {\n    ops = JSON.parse(opsJson);\n  } catch {\n    throw new Error(\"批量操作的参数不是合法 JSON\");\n  }\n  if (!Array.isArray(ops) || ops.length === 0) throw new Error(\"批量操作为空\");\n  if (ops.length > 500) throw new Error(\"单次批量操作不能超过 500 项\");\n\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  let next = readJson(localPath) || {};\n  let applied = 0;\n  for (const op of ops) {\n    if (!op || typeof op !== \"object\") continue;\n    const { kind, id, state } = op;\n    if (kind === \"plugin\") next = setPluginState(next, id, state);\n    else if (kind === \"mcp\") next = setMcpState(next, id, state);\n    else if (kind === \"skill\") next = setSkillState(next, id, state);\n    else throw new Error(\"未知类型：\" + kind);\n    applied += 1;\n  }\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, applied, settings: next };\n}\n\nfunction main() {\n  const argv = process.argv.slice(2);\n  const action = argv[0];\n  const ws = argv[1];\n  if (action === \"setMany\") {\n    if (!ws) throw new Error(\"用法：config-io.mjs setMany <workspace> <json>\");\n    if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n    process.stdout.write(JSON.stringify(setMany(ws, argv[2] || \"[]\")));\n    return;\n  }\n  const [, , kind, id, state] = argv;\n  if (!action || !ws) throw new Error(\"用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state>\");\n  if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n  const result = action === \"scan\" ? scan(ws) : action === \"set\" ? set(ws, kind, id, state) : null;\n  if (!result) throw new Error(\"未知动作：\" + action);\n  process.stdout.write(JSON.stringify(result));\n}\n\ntry {\n  main();\n} catch (err) {\n  process.stdout.write(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));\n  process.exitCode = 1;\n}\n";
+/** 行内标记。顺序即优先级：`**` 必须先于 `*`，否则粗体会被切成两个斜体。
+ * 这里存的是不带 g 的「模板」：带 g 的正则 lastIndex 是实例状态，而 parseInline
+ * 会递归，内层一重置就会把外层循环卡在原地。每次调用自己造实例。 */
+const INLINE_RE = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|~~[^~\n]+~~|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+\*)/;
+
+/** 链接只放行 http(s)。其他协议（javascript:、file:）一律降级成文字。
+ * 名字带 md 前缀：这个文件会被内联进 main.js 顶层作用域，和插件里的
+ * safeHref（给仓库链接用）重名就会直接语法错误。 */
+function safeMdHref(href) {
+  return /^https?:\/\//i.test(href) ? href : "";
+}
+
+/**
+ * 把一行切成行内节点。
+ *
+ * 强调类标记（strong/em/del）的内容会递归解析：模型很爱写
+ * `**\`owner/repo\`**` 这种「粗体包代码」，不递归的话反引号会原样显示出来。
+ * 强调标记本身不嵌套（`*a **b** c*` 会先命中内层的 `**b**`），这是有意的
+ * 简化：解读正文里几乎不会出现，换来的是流式输入下不会卡死。递归只往
+ * 「非强调」的行内标记里走，层数限死 2 层。
+ *
+ * 正则每次调用都要新造实例：带 g 的正则 lastIndex 是实例状态，递归共用一个
+ * 就会被内层重置，外层 exec 原地打转。
+ *
+ * @param {string} text
+ * @param {number} [depth]
+ * @returns {Array<{t: string, v: string, href?: string, children?: Array<object>}>}
+ */
+function parseInline(text, depth = 0) {
+  const src = String(text == null ? "" : text);
+  const out = [];
+  let last = 0;
+  let m;
+  // 递归解析强调内容时不能和外层共用同一个带 g 的正则实例。
+  const re = new RegExp(INLINE_RE.source, "g");
+  while ((m = re.exec(src))) {
+    if (m.index > last) out.push({ t: "text", v: src.slice(last, m.index) });
+    const tok = m[0];
+    const wrap = (t) => {
+      const inner = tok.slice(t === "em" ? 1 : 2, t === "em" ? -1 : -2);
+      const node = { t: t, v: inner };
+      if (depth < 2) node.children = parseInline(inner, depth + 1);
+      return node;
+    };
+    if (tok.startsWith("**")) {
+      out.push(wrap("strong"));
+    } else if (tok.startsWith("__")) {
+      out.push(wrap("strong"));
+    } else if (tok.startsWith("`")) {
+      out.push({ t: "code", v: tok.slice(1, -1) });
+    } else if (tok.startsWith("~~")) {
+      out.push(wrap("del"));
+    } else if (tok.startsWith("[")) {
+      const link = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(tok);
+      const href = link ? safeMdHref(link[2]) : "";
+      if (link && href) out.push({ t: "link", v: link[1], href: href });
+      else out.push({ t: "text", v: tok });
+    } else {
+      out.push(wrap("em"));
+    }
+    last = m.index + tok.length;
+  }
+  if (last < src.length) out.push({ t: "text", v: src.slice(last) });
+  return out;
+}
+
+/* ---- 表格与列表的识别 ---- */
+
+const FENCE_RE = /^\s*(```|~~~)\s*([^\s`]*)\s*$/;
+const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*)$/;
+const HR_RE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const QUOTE_RE = /^\s{0,3}>\s?(.*)$/;
+const UL_RE = /^(\s*)[-*+]\s+(.*)$/;
+const OL_RE = /^(\s*)\d+[.)]\s+(.*)$/;
+const TABLE_DIV_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function hasPipe(line) {
+  return String(line || "").indexOf("|") >= 0;
+}
+
+/** 表头行 + `|---|` 分隔行；只有表头行时不算表格。 */
+function isTableStart(lines, i) {
+  return i + 1 < lines.length && hasPipe(lines[i]) && hasPipe(lines[i + 1]) && TABLE_DIV_RE.test(lines[i + 1]);
+}
+
+function splitRow(raw) {
+  let s = String(raw || "").trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  // 手写扫描而不是 split(/(?<!\\)\|/)：lookbehind 在老版本 Chromium 上不支持，
+  // 宿主的内置内核版本不在我们控制范围内。`\|` 是单元格内的转义竖线。
+  const cells = [];
+  let buf = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === "\\" && s[i + 1] === "|") {
+      buf += "|";
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+function cellAlign(spec) {
+  const s = String(spec || "").trim();
+  const left = s.startsWith(":");
+  const right = s.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return "";
+}
+
+/** 缩进换算成层级：两个空格或一个 Tab 算一级，最多 4 级（再深也没人看）。 */
+function depthOf(indent) {
+  const expanded = String(indent || "").replace(/\t/g, "  ").length;
+  return Math.min(4, Math.floor(expanded / 2));
+}
+
+/** 块级元素是否从这里开始；段落收集到这些行就停。 */
+function startsBlock(lines, i) {
+  const line = lines[i];
+  return (
+    FENCE_RE.test(line) ||
+    HEADING_RE.test(line) ||
+    HR_RE.test(line) ||
+    QUOTE_RE.test(line) ||
+    UL_RE.test(line) ||
+    OL_RE.test(line) ||
+    isTableStart(lines, i)
+  );
+}
+
+/**
+ * @param {string} text 模型输出的 Markdown
+ * @returns {Array<object>} 块节点数组，结构见文件头注释
+ */
+function parseMarkdown(text) {
+  const lines = String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  let list = null;
+
+  const flushList = () => {
+    if (!list) return;
+    out.push(list);
+    list = null;
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    const fence = FENCE_RE.exec(line);
+    if (fence) {
+      flushList();
+      const marker = fence[1];
+      const lang = fence[2] || "";
+      const buf = [];
+      i += 1;
+      // 闭合行只要以同样的围栏开头即可（```js 和 ``` 都算）
+      while (i < lines.length && lines[i].trim().indexOf(marker) !== 0) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      // 未闭合时（流式中途）i 会停在末尾，代码原样输出，不丢内容
+      if (i < lines.length) i += 1;
+      out.push({ type: "code", lang: lang, text: buf.join("\n") });
+      continue;
+    }
+
+    if (isTableStart(lines, i)) {
+      flushList();
+      const head = splitRow(line).map(parseInline);
+      const align = splitRow(lines[i + 1]).map(cellAlign);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && hasPipe(lines[i]) && !startsBlock(lines, i)) {
+        const cells = splitRow(lines[i]);
+        // 列数按表头补齐/截断：模型偶尔少写一格，不能让整行错位
+        const row = [];
+        for (let c = 0; c < head.length; c += 1) row.push(parseInline(cells[c] == null ? "" : cells[c]));
+        rows.push(row);
+        i += 1;
+      }
+      out.push({ type: "table", align: align, head: head, rows: rows });
+      continue;
+    }
+
+    const heading = HEADING_RE.exec(line);
+    if (heading) {
+      flushList();
+      out.push({ type: "heading", level: Math.min(6, heading[1].length), inlines: parseInline(heading[2]) });
+      i += 1;
+      continue;
+    }
+
+    if (HR_RE.test(line)) {
+      flushList();
+      out.push({ type: "hr" });
+      i += 1;
+      continue;
+    }
+
+    if (QUOTE_RE.test(line)) {
+      flushList();
+      const buf = [];
+      while (i < lines.length) {
+        const q = QUOTE_RE.exec(lines[i]);
+        if (!q) break;
+        buf.push(q[1]);
+        i += 1;
+      }
+      out.push({ type: "quote", inlines: parseInline(buf.join(" ")) });
+      continue;
+    }
+
+    const ul = UL_RE.exec(line);
+    const ol = OL_RE.exec(line);
+    if (ul || ol) {
+      const type = ul ? "ul" : "ol";
+      // 有序/无序切换或缩进回退都要重开一个列表：混在一个 <ul> 里会全变成圆点
+      if (!list || list.type !== type || list.depth !== depthOf((ul || ol)[1])) {
+        flushList();
+        list = { type: type, depth: depthOf((ul || ol)[1]), items: [] };
+      }
+      list.items.push({ inlines: parseInline((ul || ol)[2]), depth: depthOf((ul || ol)[1]) });
+      i += 1;
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushList();
+      i += 1;
+      continue;
+    }
+
+    flushList();
+    const buf = [line];
+    i += 1;
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) {
+      buf.push(lines[i]);
+      i += 1;
+    }
+    out.push({ type: "paragraph", inlines: parseInline(buf.join(" ")) });
+  }
+
+  flushList();
+  return out;
+}
+
+// ---- ccgui-plugin-shared/markdown-view.mjs ----
+/**
+ * 把 markdown.mjs 的块节点渲染成元素。
+ *
+ * 解析与渲染分开的理由：worklog 与 github-trending 共用解析器，但渲染出来
+ * 的类名与可交互节点不同——worklog 要把会话短 ID 变成可点的按钮，trending
+ * 不需要。所以解析层是纯函数，渲染层接一个 `extraInline` 钩子。
+ *
+ * 全程不拼 HTML 字符串：模型输出属于不可信内容，只当文本处理。
+ */
+
+
+/**
+ * 解析结果缓存。流式输出时每个 delta 都会重渲染整棵报告树，而解析要扫全文；
+ * 内容没变（别处 set 触发的重渲染）就不该再解析一遍。
+ */
+const mdCache = new Map();
+const MD_CACHE_LIMIT = 4;
+
+/**
+ * @param {string} text
+ * @returns {Array<object>} 块节点；相同输入返回同一个数组引用
+ */
+function markdownBlocks(text) {
+  const src = String(text || "");
+  const hit = mdCache.get(src);
+  if (hit) {
+    // 命中后挪到队尾：Map 保持插入序，删第一个就是删最久没用的。
+    mdCache.delete(src);
+    mdCache.set(src, hit);
+    return hit;
+  }
+  const blocks = parseMarkdown(src);
+  mdCache.set(src, blocks);
+  while (mdCache.size > MD_CACHE_LIMIT) mdCache.delete(mdCache.keys().next().value);
+  return blocks;
+}
+
+/**
+ * 行内节点 → 元素。
+ *
+ * @param {Function} h createElement
+ * @param {Array<object>} inlines parseMarkdown 产出的行内节点
+ * @param {string} keyBase
+ * @param {string} codeClass 行内代码的类名（各插件前缀不同）
+ * @param {(text: string, keyBase: string, h: Function) => Array|null} [textHook]
+ *   纯文本节点的改写机会。返回数组就用它（可以拆成多个节点），返回 null
+ *   就按普通文字输出。worklog 用它把会话短 ID 变成可点按钮。
+ */
+function inlineNodes(h, inlines, keyBase, codeClass, textHook) {
+  return (inlines || []).map((n, i) => {
+    const key = keyBase + "i" + i;
+    if (n.children) {
+      return h(n.t === "strong" ? "strong" : n.t === "em" ? "em" : "del", { key },
+        inlineNodes(h, n.children, key + "_", codeClass, textHook));
+    }
+    if (n.t === "text" && typeof textHook === "function") {
+      const got = textHook(n.v, key, h);
+      if (got) return got;
+    }
+    if (n.t === "strong") return h("strong", { key }, n.v);
+    if (n.t === "em") return h("em", { key }, n.v);
+    if (n.t === "del") return h("del", { key }, n.v);
+    if (n.t === "code") return h("code", { key, className: codeClass || "" }, n.v);
+    if (n.t === "link") {
+      return h("a", { key, href: n.href, target: "_blank", rel: "noreferrer noopener" }, n.v);
+    }
+    return n.v;
+  });
+}
+
+/**
+ * 渲染整份 Markdown。
+ *
+ * @param {Function} h createElement
+ * @param {string} text
+ * @param {object} [opts]
+ * @param {string} [opts.prefix] 类名前缀，如 "wl"；产出 `${prefix}-md-*`
+ * @param {(text: string, keyBase: string, h: Function) => Array|null} [opts.extraInline]
+ *   纯文本节点的改写钩子。返回数组就用它（可以拆成多个节点），返回 null
+ *   就走默认输出。worklog 用它把会话短 ID 变成可点按钮。
+ * @returns {Array|null} 元素数组
+ */
+function renderMarkdown(h, text, opts) {
+  const o = opts || {};
+  const prefix = o.prefix || "md";
+  const codeClass = prefix + "-md-code";
+  const blocks = markdownBlocks(text);
+  const inline = (inlines, keyBase) =>
+    inlineNodes(h, inlines, keyBase, codeClass, o.extraInline);
+
+  return blocks.map((b, i) => {
+    const key = prefix + "md" + i;
+    if (b.type === "heading") {
+      return h("h" + b.level, { key, className: prefix + "-md-h" + b.level }, inline(b.inlines, key));
+    }
+    if (b.type === "paragraph") {
+      return h("p", { key, className: prefix + "-md-p" }, inline(b.inlines, key));
+    }
+    if (b.type === "hr") return h("hr", { key, className: prefix + "-md-hr" });
+    if (b.type === "quote") {
+      return h("blockquote", { key, className: prefix + "-md-quote" }, inline(b.inlines, key));
+    }
+    if (b.type === "code") {
+      return h(
+        "pre",
+        { key, className: prefix + "-md-pre" },
+        h("code", { className: b.lang ? "language-" + b.lang : "" }, b.text),
+      );
+    }
+    if (b.type === "ul" || b.type === "ol") {
+      return h(
+        b.type,
+        {
+          key,
+          className: prefix + "-md-list",
+          // 解析器在缩进变化时重开一个列表（混在一个 <ul> 里会全变圆点），
+          // 所以层级信息落在块本身的 depth 上，渲染时按它缩进。
+          style: b.depth ? { marginLeft: b.depth * 14 } : undefined,
+        },
+        b.items.map((item, j) =>
+          h(
+            "li",
+            { key: key + "li" + j },
+            inline(item.inlines, key + "li" + j),
+          ),
+        ),
+      );
+    }
+    if (b.type === "table") {
+      const cellStyle = (ci) => (b.align[ci] ? { textAlign: b.align[ci] } : undefined);
+      return h(
+        "div",
+        { key, className: prefix + "-md-table-wrap" },
+        h(
+          "table",
+          { className: prefix + "-md-table" },
+          h(
+            "thead",
+            null,
+            h(
+              "tr",
+              null,
+              b.head.map((cell, ci) =>
+                h("th", { key: key + "th" + ci, style: cellStyle(ci) }, inline(cell, key + "th" + ci)),
+              ),
+            ),
+          ),
+          h(
+            "tbody",
+            null,
+            b.rows.map((row, ri) =>
+              h(
+                "tr",
+                { key: key + "tr" + ri },
+                row.map((cell, ci) =>
+                  h(
+                    "td",
+                    { key: key + "td" + ci, style: cellStyle(ci) },
+                    inline(cell, key + "td" + ri + "_" + ci),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return null;
+  });
+}
+
+
+const SCAN_SOURCE = "/* 三态模型：项目级配置只表达「跟随全局 / 启用 / 禁用」，不碰全局文件。\n * 纯函数，浏览器与 node 都能跑；写操作一律返回新对象。 */\n\nconst PROJECT_SETTINGS_REL = \".claude/settings.local.json\";\nconst SHARED_SETTINGS_REL = \".claude/settings.json\";\n\nconst TRI_STATES = [\"inherit\", \"on\", \"off\"];\n// MCP 只有 denylist 可写：项目级能禁用，不能解除全局的禁用。\nconst MCP_STATES = [\"inherit\", \"off\"];\n\nconst has = (obj, key) =>\n  obj !== null && typeof obj === \"object\" && Object.prototype.hasOwnProperty.call(obj, key);\n\n/** settings 是 JSON 文档，深拷贝用 JSON 往返即可；不依赖 structuredClone。 */\nfunction cloneSettings(settings) {\n  return settings && typeof settings === \"object\" ? JSON.parse(JSON.stringify(settings)) : {};\n}\n\n/** 空键不落盘：面板把某栏全部改回「跟随全局」时，文件里不该留下空对象。 */\nfunction prune(settings) {\n  const next = cloneSettings(settings);\n  if (next.enabledPlugins && Object.keys(next.enabledPlugins).length === 0) delete next.enabledPlugins;\n  if (Array.isArray(next.deniedMcpServers) && next.deniedMcpServers.length === 0) delete next.deniedMcpServers;\n  if (next.skillOverrides && Object.keys(next.skillOverrides).length === 0) delete next.skillOverrides;\n  return next;\n}\n\nfunction assertState(state, allowed, kind) {\n  if (!allowed.includes(state)) {\n    throw new Error(`${kind} 不支持的状态：${state}（允许 ${allowed.join(\" / \")}）`);\n  }\n}\n\n/* ------------------------------------------------------------ plugin */\n\nfunction getPluginState(project, id) {\n  if (!has(project.enabledPlugins, id)) return \"inherit\";\n  return project.enabledPlugins[id] === false ? \"off\" : \"on\";\n}\n\nfunction setPluginState(project, id, state) {\n  assertState(state, TRI_STATES, \"plugin\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.enabledPlugins, id)) delete next.enabledPlugins[id];\n  } else {\n    next.enabledPlugins = { ...(next.enabledPlugins || {}), [id]: state === \"on\" };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ mcp */\n\nfunction getMcpState(project, serverName) {\n  const list = project.deniedMcpServers;\n  if (!Array.isArray(list)) return \"inherit\";\n  return list.some((entry) => entry && entry.serverName === serverName) ? \"off\" : \"inherit\";\n}\n\n/** 只增删 serverName 条目；serverCommand / serverUrl 条目原样保留。 */\nfunction setMcpState(project, serverName, state) {\n  if (state === \"on\") {\n    throw new Error(\"MCP 项目级无法显式启用：全局已禁用时不受项目控制，请改用 inherit\");\n  }\n  assertState(state, MCP_STATES, \"mcp\");\n  const next = cloneSettings(project);\n  const list = Array.isArray(next.deniedMcpServers) ? next.deniedMcpServers.slice() : [];\n  const filtered = list.filter((entry) => !(entry && entry.serverName === serverName));\n  if (state === \"off\") filtered.push({ serverName });\n  next.deniedMcpServers = filtered;\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ skill */\n\nfunction getSkillState(project, name) {\n  if (!has(project.skillOverrides, name)) return \"inherit\";\n  return project.skillOverrides[name] === \"off\" ? \"off\" : \"on\";\n}\n\nfunction setSkillState(project, name, state) {\n  assertState(state, TRI_STATES, \"skill\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.skillOverrides, name)) delete next.skillOverrides[name];\n  } else {\n    next.skillOverrides = { ...(next.skillOverrides || {}), [name]: state };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ 展示用 */\n\n/** 项目覆盖了多少项；panel tab 的徽标数字。 */\nfunction overrideCount(project) {\n  const plugins = project.enabledPlugins ? Object.keys(project.enabledPlugins).length : 0;\n  const mcp = Array.isArray(project.deniedMcpServers)\n    ? project.deniedMcpServers.filter((entry) => entry && entry.serverName).length\n    : 0;\n  const skills = project.skillOverrides ? Object.keys(project.skillOverrides).length : 0;\n  return plugins + mcp + skills;\n}\n\n/** 项目态优先；inherit 时回落到全局态。 */\nfunction effectiveState(projectState, globalState) {\n  if (projectState && projectState !== \"inherit\") return projectState;\n  return globalState || \"unknown\";\n}\n\n/* 子进程：读写项目级 Claude Code 配置。\n *\n * 插件本体拿不到文件系统，只能把这份脚本落盘后经 exec:node 执行。\n * 构建时 scripts/build.mjs 会把 src/lib/model.mjs 的源码内联进来，\n * 所以这里唯一允许的兄弟 import 是 model；其余只能用 node 内置模块。\n *\n * 用法：\n *   node config-io.mjs scan <workspace>\n *   node config-io.mjs set  <workspace> <plugin|mcp|skill> <id> <inherit|on|off>\n * 输出：单行 JSON，ok=false 时附带 error。\n */\n\nimport fs from \"node:fs\";\nimport os from \"node:os\";\nimport path from \"node:path\";\n\nconst HOME = process.env.USERPROFILE || process.env.HOME || os.homedir();\nconst CLAUDE_DIR = path.join(HOME, \".claude\");\nconst CLAUDE_JSON = path.join(HOME, \".claude.json\");\n\nfunction readJson(file) {\n  try {\n    let text = fs.readFileSync(file, \"utf8\");\n    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);\n    return JSON.parse(text);\n  } catch {\n    return null;\n  }\n}\n\nfunction writeJsonAtomic(file, data) {\n  fs.mkdirSync(path.dirname(file), { recursive: true });\n  const tmp = file + \".tmp-\" + process.pid;\n  const body = JSON.stringify(data, null, 2) + \"\\n\";\n  fs.writeFileSync(tmp, body, \"utf8\");\n  fs.renameSync(tmp, file);\n}\n\nconst norm = (p) => String(p || \"\").replace(/\\\\/g, \"/\").replace(/\\/+$/, \"\").toLowerCase();\n\nfunction findProjectEntry(config, ws) {\n  const projects = (config && config.projects) || {};\n  const target = norm(ws);\n  const key = Object.keys(projects).find((k) => norm(k) === target);\n  return key ? projects[key] : null;\n}\n\nfunction listSkillDirs(root, source, plugin) {\n  const out = [];\n  let entries = [];\n  try {\n    entries = fs.readdirSync(root, { withFileTypes: true });\n  } catch {\n    return out;\n  }\n  for (const entry of entries) {\n    if (!entry.isDirectory()) continue;\n    const md = path.join(root, entry.name, \"SKILL.md\");\n    if (!fs.existsSync(md)) continue;\n    out.push({ name: entry.name, source, plugin: plugin || null, path: md, description: readSkillDescription(md) });\n  }\n  return out;\n}\n\nfunction installedPlugins() {\n  const raw = readJson(path.join(CLAUDE_DIR, \"plugins\", \"installed_plugins.json\"));\n  const map = {};\n  const plugins = (raw && raw.plugins) || {};\n  for (const [id, list] of Object.entries(plugins)) {\n    if (!Array.isArray(list) || list.length === 0) continue;\n    const pick = list.find((e) => e && e.scope === \"user\") || list[0];\n    map[id] = {\n      installPath: pick && pick.installPath ? pick.installPath : \"\",\n      scopes: list.map((e) => e && e.scope).filter(Boolean),\n    };\n  }\n  return map;\n}\n\n/** 插件 .mcp.json 有两种写法：{ mcpServers: { name: cfg } } 和扁平的 { name: cfg }。 */\nfunction pluginServers(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return {};\n  const wrapped = cfg.mcpServers || cfg.servers;\n  if (wrapped && typeof wrapped === \"object\") return wrapped;\n  const out = {};\n  for (const [key, value] of Object.entries(cfg)) {\n    if (value && typeof value === \"object\"\n      && (\"command\" in value || \"url\" in value || \"type\" in value)) {\n      out[key] = value;\n    }\n  }\n  return out;\n}\n\n/** 插件描述：优先 .claude-plugin/plugin.json，其次根目录的 plugin.json / manifest.json。 */\nfunction pluginDescription(dir) {\n  if (!dir) return \"\";\n  for (const rel of [\".claude-plugin/plugin.json\", \"plugin.json\", \"manifest.json\"]) {\n    const cfg = readJson(path.join(dir, rel));\n    if (cfg && typeof cfg.description === \"string\" && cfg.description.trim()) {\n      return cfg.description.trim();\n    }\n  }\n  return \"\";\n}\n\n/** SKILL.md frontmatter 里的 description；只读前 50 行。 */\nfunction readSkillDescription(file) {\n  try {\n    const lines = fs.readFileSync(file, \"utf8\").split(/\\r?\\n/).slice(0, 50);\n    if (!lines.length || lines[0].trim() !== \"---\") return \"\";\n    let collecting = false;\n    const block = [];\n    for (let i = 1; i < lines.length; i++) {\n      const line = lines[i];\n      if (line.trim() === \"---\") break;\n      const match = /^description:\\s*(.*)$/.exec(line);\n      if (match) {\n        const value = match[1].trim();\n        if (/^[|>][-+]?$/.test(value)) { collecting = true; continue; }\n        return value.replace(/^[\"']|[\"']$/g, \"\").trim();\n      }\n      if (collecting) {\n        if (/^\\s+\\S/.test(line)) block.push(line.trim());\n        else break;\n      }\n    }\n    return block.join(\" \").trim();\n  } catch {\n    return \"\";\n  }\n}\n\nfunction mcpDescription(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return \"\";\n  if (typeof cfg.url === \"string\") return cfg.url;\n  if (typeof cfg.command === \"string\") {\n    const args = Array.isArray(cfg.args) ? \" \" + cfg.args.join(\" \") : \"\";\n    return (cfg.command + args).trim();\n  }\n  return \"\";\n}\n\nfunction scan(ws) {\n  const globalSettings = readJson(path.join(CLAUDE_DIR, \"settings.json\")) || {};\n  const globalConfig = readJson(CLAUDE_JSON) || {};\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const sharedPath = path.join(ws, SHARED_SETTINGS_REL);\n  const local = readJson(localPath) || {};\n  const shared = readJson(sharedPath) || {};\n\n  // 项目层：local 压过 shared；面板只写 local。\n  const projectLayer = Object.assign({}, shared, local);\n  for (const key of [\"enabledPlugins\", \"skillOverrides\"]) {\n    if (shared[key] || local[key]) {\n      projectLayer[key] = Object.assign({}, shared[key] || {}, local[key] || {});\n    }\n  }\n  if (Array.isArray(shared.deniedMcpServers) || Array.isArray(local.deniedMcpServers)) {\n    projectLayer.deniedMcpServers = [\n      ...(Array.isArray(shared.deniedMcpServers) ? shared.deniedMcpServers : []),\n      ...(Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []),\n    ];\n  }\n\n  /* ---------------- plugins ---------------- */\n\n  const installed = installedPlugins();\n  const pluginIds = new Set(Object.keys(globalSettings.enabledPlugins || {}));\n  for (const id of Object.keys(installed)) pluginIds.add(id);\n\n  const plugins = [];\n  for (const id of [...pluginIds].sort()) {\n    const at = id.lastIndexOf(\"@\");\n    const name = at > 0 ? id.slice(0, at) : id;\n    const marketplace = at > 0 ? id.slice(at + 1) : \"\";\n    const enabled = globalSettings.enabledPlugins && globalSettings.enabledPlugins[id];\n    const globalState = enabled === false ? \"off\" : enabled === true ? \"on\" : \"unknown\";\n    const projectState = getPluginState(projectLayer, id);\n    plugins.push({\n      kind: \"plugin\",\n      id,\n      name,\n      marketplace,\n      installed: Boolean(installed[id]),\n      installPath: installed[id] ? installed[id].installPath : \"\",\n      description: installed[id] ? pluginDescription(installed[id].installPath) : \"\",\n      globalState,\n      projectState,\n      // 面板只能写 local；shared 是被仓库共享的团队配置，单独列出以便界面说明「跟随」会落到哪一层。\n      localState: getPluginState(local, id),\n      sharedState: getPluginState(shared, id),\n      effectiveState: effectiveState(projectState, globalState),\n    });\n  }\n\n  /* ---------------- mcp ---------------- */\n\n  const userMcp = globalConfig.mcpServers || {};\n  const localMcp = (findProjectEntry(globalConfig, ws) || {}).mcpServers || {};\n  const projectMcp = (readJson(path.join(ws, \".mcp.json\")) || {}).mcpServers || {};\n\n  // 插件自带的 MCP：plugin 包里的 .mcp.json，同样能被 deniedMcpServers 拦住。\n  const pluginMcp = {};\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const cfg = readJson(path.join(info.installPath, \".mcp.json\"));\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    for (const [name, value] of Object.entries(pluginServers(cfg))) {\n      if (!(name in pluginMcp)) pluginMcp[name] = { plugin: pluginName, config: value };\n    }\n  }\n\n  const mcpNames = new Set([\n    ...Object.keys(userMcp),\n    ...Object.keys(localMcp),\n    ...Object.keys(projectMcp),\n    ...Object.keys(pluginMcp),\n  ]);\n\n  const globalDenied = Array.isArray(globalSettings.deniedMcpServers)\n    ? globalSettings.deniedMcpServers\n    : [];\n\n  const mcp = [...mcpNames].sort().map((name) => {\n    const scopes = [];\n    if (localMcp[name]) scopes.push(\"local\");\n    if (projectMcp[name]) scopes.push(\"project\");\n    if (userMcp[name]) scopes.push(\"user\");\n    if (pluginMcp[name]) scopes.push(\"plugin\");\n    const deniedGlobally = globalDenied.some((e) => e && e.serverName === name);\n    // local > project > user > plugin 是 Claude Code 的生效顺序\n    const scope = scopes[0] || \"user\";\n    const pluginEntry = pluginMcp[name];\n    const config = localMcp[name] || projectMcp[name] || userMcp[name]\n      || (pluginEntry && pluginEntry.config) || null;\n    const projectState = getMcpState(projectLayer, name);\n    const globalState = deniedGlobally ? \"off\" : \"on\";\n    return {\n      kind: \"mcp\",\n      id: name,\n      name,\n      scope,\n      scopes,\n      plugin: pluginEntry ? pluginEntry.plugin : null,\n      description: mcpDescription(config),\n      globalState,\n      projectState,\n      localState: getMcpState(local, name),\n      sharedState: getMcpState(shared, name),\n      canEnable: !deniedGlobally,\n      effectiveState: deniedGlobally ? \"off\" : effectiveState(projectState, \"on\"),\n    };\n  });\n\n  /* ---------------- skills ---------------- */\n\n  const skills = [];\n  skills.push(...listSkillDirs(path.join(CLAUDE_DIR, \"skills\"), \"personal\"));\n  skills.push(...listSkillDirs(path.join(ws, \".claude\", \"skills\"), \"project\"));\n\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    skills.push(...listSkillDirs(path.join(info.installPath, \"skills\"), \"plugin\", pluginName));\n  }\n\n  const globalOverrides = globalSettings.skillOverrides || {};\n  const seen = new Map();\n  const skillRows = skills.map((s) => {\n    const globalRaw = globalOverrides[s.name];\n    const globalState = globalRaw === \"off\" ? \"off\" : \"on\";\n    const projectState = getSkillState(projectLayer, s.name);\n    const row = {\n      kind: \"skill\",\n      id: s.name,\n      name: s.name,\n      source: s.source,\n      plugin: s.plugin,\n      description: s.description || \"\",\n      globalState,\n      projectState,\n      localState: getSkillState(local, s.name),\n      sharedState: getSkillState(shared, s.name),\n      effectiveState: effectiveState(projectState, globalState),\n      controllable: s.source !== \"plugin\",\n    };\n    const key = s.name;\n    if (!seen.has(key)) seen.set(key, []);\n    seen.get(key).push(s.source);\n    return row;\n  });\n\n  for (const row of skillRows) {\n    const sources = seen.get(row.name) || [];\n    row.shadowed = row.source === \"personal\" && sources.includes(\"project\");\n    if (row.controllable && sources.length > 1) {\n      row.effectiveSource = sources.includes(\"personal\") ? \"personal\" : \"project\";\n    } else if (!row.controllable) {\n      row.effectiveSource = \"plugin\";\n    } else {\n      row.effectiveSource = row.source;\n    }\n  }\n\n  /* ---------------- diagnostics ---------------- */\n\n  // 面板只列「当前存在的资源」，所以 local 里指向已消失资源的键会完全没有入口。\n  // 这里把它们找出来：stale 项可以一键清掉，其余只提示原因。\n  const diagnostics = [];\n  const seenDiag = new Set();\n  // 同名技能可能被多个来源列出（个人版与项目版、或多个插件共用 installPath），\n  // 诊断只该报一次。\n  const diag = (level, kind, id, name, message, fixable) => {\n    const key = level + \":\" + kind + \":\" + id;\n    if (seenDiag.has(key)) return;\n    seenDiag.add(key);\n    diagnostics.push({ level, kind, id, name, message, fixable: Boolean(fixable) });\n  };\n\n  const knownPlugins = new Set(plugins.map((p) => p.id));\n  for (const id of Object.keys(local.enabledPlugins || {})) {\n    if (!knownPlugins.has(id)) diag(\"stale\", \"plugin\", id, id, \"插件已不存在，本地仍保留开关\", true);\n  }\n  for (const p of plugins) {\n    if (!p.installed && p.globalState === \"on\") {\n      diag(\"warn\", \"plugin\", p.id, p.name, \"全局启用但本机未安装\", false);\n    }\n  }\n\n  const knownSkills = new Set(skillRows.map((r) => r.name));\n  for (const name of Object.keys(local.skillOverrides || {})) {\n    if (!knownSkills.has(name)) diag(\"stale\", \"skill\", name, name, \"技能已不存在，本地仍保留开关\", true);\n  }\n  for (const r of skillRows) {\n    const localTouched = Object.prototype.hasOwnProperty.call(local.skillOverrides || {}, r.name);\n    if (r.shadowed) diag(\"info\", \"skill\", r.id, r.name, \"项目版本被同名个人技能遮蔽\", false);\n    if (r.controllable === false && localTouched) {\n      diag(\"warn\", \"skill\", r.id, r.name, \"插件提供的技能不受本地开关控制\", false);\n    }\n  }\n\n  const knownMcp = new Set(mcpNames);\n  for (const entry of Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []) {\n    if (entry && entry.serverName && !knownMcp.has(entry.serverName)) {\n      diag(\"stale\", \"mcp\", entry.serverName, entry.serverName, \"MCP 已不存在，本地仍保留禁用\", true);\n    }\n  }\n  for (const row of mcp) {\n    if (row.sharedState === \"off\") {\n      diag(\"warn\", \"mcp\", row.id, row.name, \"团队配置已禁用，本地无法解除\", false);\n    }\n  }\n\n  return {\n    ok: true,\n    workspace: ws,\n    files: { local: localPath, shared: sharedPath },\n    pluginCount: plugins.length,\n    plugins,\n    mcp,\n    skills: skillRows,\n    diagnostics,\n  };\n}\n\n/* ---------------- 记忆文件（只读） ---------------- */\n\n// Claude Code 按工作区路径生成会话目录名：非字母数字一律变 -。\n// D:\\projects\\notes\\cc-wrapped → D--projects-notes-cc-wrapped\nfunction memorySlug(ws) {\n  return path.resolve(ws).replace(/[^a-zA-Z0-9]/g, \"-\");\n}\n\n/** 从 frontmatter / 一级标题里取展示用的标题与描述。只读文件开头。 */\nfunction readMemoryMeta(file) {\n  const base = path.basename(file, \".md\");\n  try {\n    const head = fs.readFileSync(file, \"utf8\").slice(0, 8192);\n    let description = \"\";\n    const fm = /^---\\r?\\n([\\s\\S]*?)\\r?\\n---/.exec(head);\n    if (fm) {\n      const line = /^description:\\s*(.+)$/m.exec(fm[1]);\n      if (line) description = line[1].trim().replace(/^[\"']|[\"']$/g, \"\");\n    }\n    const h1 = /^#\\s+(.+)$/m.exec(head);\n    return { title: h1 ? h1[1].trim() : base, description };\n  } catch {\n    return { title: base, description: \"\" };\n  }\n}\n\n/**\n * 收集当前工作区相关的全部记忆文件，只读不改。\n *\n * 三类来源：\n *   auto     ~/.claude/projects/<slug>/memory/*.md（Claude 自己维护）\n *   project  <ws>/CLAUDE.md、<ws>/.claude/CLAUDE.md，以及上级目录链上的 CLAUDE.md\n *   user     ~/.claude/CLAUDE.md\n *\n * 返回的 path 是绝对路径，随后 memoryRead 会重新收集一遍并只认这个白名单，\n * 所以外部无法借这个动作读任意文件。\n */\nfunction collectMemory(ws) {\n  const files = [];\n  const seen = new Set();\n\n  const push = (source, root, file) => {\n    const abs = path.resolve(file);\n    if (seen.has(abs)) return;\n    let st;\n    try {\n      st = fs.statSync(abs);\n    } catch {\n      return;\n    }\n    if (!st.isFile()) return;\n    seen.add(abs);\n    const meta = readMemoryMeta(abs);\n    // 展示路径：在 root 之内就相对 root，否则相对 HOME（避免三个同名\n    // CLAUDE.md 排在一起分不清是工作区里的还是全局的）。\n    let rel = path.relative(root, abs).replace(/\\\\/g, \"/\");\n    if (!rel || rel.startsWith(\"..\")) {\n      const fromHome = path.relative(HOME, abs).replace(/\\\\/g, \"/\");\n      rel = fromHome.startsWith(\"..\") ? abs.replace(/\\\\/g, \"/\") : \"~/\" + fromHome;\n    }\n    files.push({\n      source,\n      name: path.basename(abs),\n      rel,\n      path: abs,\n      title: meta.title,\n      description: meta.description,\n      size: st.size,\n      mtime: st.mtimeMs,\n    });\n  };\n\n  // 项目记忆：Claude Code 会从工作区向上逐级读取 CLAUDE.md。\n  // 层级限死，避免磁盘根目录上的杂项被算进来。\n  let dir = path.resolve(ws);\n  for (let depth = 0; depth < 12; depth++) {\n    push(\"project\", dir, path.join(dir, \"CLAUDE.md\"));\n    push(\"project\", dir, path.join(dir, \".claude\", \"CLAUDE.md\"));\n    const parent = path.dirname(dir);\n    if (parent === dir) break;\n    dir = parent;\n  }\n  // 新版 Claude Code 的项目规则目录，存在就一并列出。\n  const rulesDir = path.join(path.resolve(ws), \".claude\", \"rules\");\n  try {\n    for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {\n      if (entry.isFile() && entry.name.endsWith(\".md\")) {\n        push(\"project\", path.resolve(ws), path.join(rulesDir, entry.name));\n      }\n    }\n  } catch {\n    // 没有 rules 目录是常态\n  }\n\n  push(\"user\", CLAUDE_DIR, path.join(CLAUDE_DIR, \"CLAUDE.md\"));\n\n  const autoDir = path.join(CLAUDE_DIR, \"projects\", memorySlug(ws), \"memory\");\n  try {\n    for (const entry of fs.readdirSync(autoDir, { withFileTypes: true })) {\n      if (entry.isFile() && entry.name.endsWith(\".md\")) {\n        push(\"auto\", autoDir, path.join(autoDir, entry.name));\n      }\n    }\n  } catch {\n    // 这个工作区还没有自动记忆，目录不存在是正常的\n  }\n\n  // 自动记忆里 MEMORY.md 是索引，排最前；其余按修改时间倒序。\n  const order = { auto: 0, project: 1, user: 2 };\n  files.sort((a, b) => {\n    if (order[a.source] !== order[b.source]) return order[a.source] - order[b.source];\n    if (a.source === \"auto\") {\n      if (a.name === \"MEMORY.md\") return -1;\n      if (b.name === \"MEMORY.md\") return 1;\n      return b.mtime - a.mtime;\n    }\n    return a.rel.localeCompare(b.rel);\n  });\n\n  return {\n    ok: true,\n    workspace: path.resolve(ws),\n    slug: memorySlug(ws),\n    autoDir,\n    autoExists: files.some((f) => f.source === \"auto\"),\n    files,\n  };\n}\n\nconst MEMORY_READ_LIMIT = 512 * 1024;\n\nfunction readMemory(ws, target) {\n  const list = collectMemory(ws);\n  const file = list.files.find((f) => f.path === path.resolve(String(target || \"\")));\n  if (!file) throw new Error(\"记忆文件不存在，或不在可读范围内\");\n  const raw = fs.readFileSync(file.path, \"utf8\");\n  // 字节数与列表里的 size 用同一口径（stat 的 size 就是 UTF-8 字节数）；\n  // 用 raw.length 会按 UTF-16 计数，中文文件在列表和正文里显示成两个数字。\n  const bytes = Buffer.byteLength(raw, \"utf8\");\n  const truncated = bytes > MEMORY_READ_LIMIT;\n  let content = raw;\n  if (truncated) {\n    // 按字符累加字节截断：直接切 Buffer 会把多字节字符拦腰截断，\n    // 末尾变成一个乱码替换符。\n    let used = 0;\n    let cut = 0;\n    for (const ch of raw) {\n      const size = Buffer.byteLength(ch, \"utf8\");\n      if (used + size > MEMORY_READ_LIMIT) break;\n      used += size;\n      cut += ch.length;\n    }\n    content = raw.slice(0, cut);\n  }\n  return {\n    ok: true,\n    file: {\n      source: file.source,\n      name: file.name,\n      rel: file.rel,\n      path: file.path,\n      title: file.title,\n      size: file.size,\n      truncated,\n      content,\n    },\n  };\n}\n\nfunction set(ws, kind, id, state) {\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const current = readJson(localPath) || {};\n  let next;\n  if (kind === \"plugin\") next = setPluginState(current, id, state);\n  else if (kind === \"mcp\") next = setMcpState(current, id, state);\n  else if (kind === \"skill\") next = setSkillState(current, id, state);\n  else throw new Error(\"未知类型：\" + kind);\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, settings: next };\n}\n\n/** 一次写完多条：同类型共用一个文件，避免每行起一次子进程。 */\nfunction setMany(ws, opsJson) {\n  let ops;\n  try {\n    ops = JSON.parse(opsJson);\n  } catch {\n    throw new Error(\"批量操作的参数不是合法 JSON\");\n  }\n  if (!Array.isArray(ops) || ops.length === 0) throw new Error(\"批量操作为空\");\n  if (ops.length > 500) throw new Error(\"单次批量操作不能超过 500 项\");\n\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  let next = readJson(localPath) || {};\n  let applied = 0;\n  for (const op of ops) {\n    if (!op || typeof op !== \"object\") continue;\n    const { kind, id, state } = op;\n    if (kind === \"plugin\") next = setPluginState(next, id, state);\n    else if (kind === \"mcp\") next = setMcpState(next, id, state);\n    else if (kind === \"skill\") next = setSkillState(next, id, state);\n    else throw new Error(\"未知类型：\" + kind);\n    applied += 1;\n  }\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, applied, settings: next };\n}\n\nfunction main() {\n  const argv = process.argv.slice(2);\n  const action = argv[0];\n  const ws = argv[1];\n  if (action === \"setMany\") {\n    if (!ws) throw new Error(\"用法：config-io.mjs setMany <workspace> <json>\");\n    if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n    process.stdout.write(JSON.stringify(setMany(ws, argv[2] || \"[]\")));\n    return;\n  }\n  const [, , kind, id, state] = argv;\n  if (!action || !ws) throw new Error(\"用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state> | memory <workspace> | memoryRead <workspace> <file>\");\n  if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n  let result = null;\n  if (action === \"scan\") result = scan(ws);\n  else if (action === \"set\") result = set(ws, kind, id, state);\n  else if (action === \"memory\") result = collectMemory(ws);\n  else if (action === \"memoryRead\") result = readMemory(ws, argv[2]);\n  if (!result) throw new Error(\"未知动作：\" + action);\n  process.stdout.write(JSON.stringify(result));\n}\n\ntry {\n  main();\n} catch (err) {\n  process.stdout.write(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));\n  process.exitCode = 1;\n}\n";
 
 const STYLE = `
 .wc-root { height: 100%; min-height: 0; position: relative; display: flex; flex-direction: column; color: inherit; background: transparent; font-size: 13px; line-height: 1.5; overflow: hidden; }
@@ -919,11 +1364,56 @@ const STYLE = `
 .wc-nav-item:not(.wc-on) .wc-nav-badge { background: rgba(79,140,255,.12); opacity: .8; }
 .wc-detail { min-width: 0; }
 .wc-detail .wc-sec { margin: 0; }
+/* 记忆属于「看」而不是「改」，和三类开关之间拉一条分隔线，避免误读成一个开关类别 */
+.wc-nav-sep { height: 1px; margin: 8px 6px; background: rgba(127,127,127,.16); }
+.wc-mem { display: flex; flex-direction: column; gap: 10px; }
+.wc-mem-head { display: flex; align-items: center; gap: 10px; }
+.wc-mem-count { font-size: 12px; font-weight: 600; }
+.wc-mem-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .45; }
+.wc-mem-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; align-items: start; }
+.wc-mem-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wc-mem-item { display: flex; flex-direction: column; gap: 2px; font: inherit; text-align: left; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
+.wc-mem-item:hover { background: rgba(127,127,127,.06); }
+.wc-mem-item.wc-on { background: rgba(79,140,255,.12); }
+.wc-mem-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wc-mem-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.wc-mem-meta { font-size: 10.5px; opacity: .45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-mem-tag { flex: none; padding: 0 6px; border-radius: 999px; font-size: 10.5px; line-height: 16px; background: rgba(127,127,127,.1); opacity: .8; }
+.wc-mem-tag-auto { background: rgba(79,140,255,.16); opacity: 1; }
+.wc-mem-tag-project { background: rgba(46,160,67,.16); opacity: 1; }
+.wc-mem-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.wc-mem-body-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wc-mem-body-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-mem-body-meta { margin-left: auto; flex: none; font-size: 11px; opacity: .45; }
+.wc-mem-path { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; opacity: .55; word-break: break-all; user-select: text; }
+.wc-mem-warn { margin: 0; font-size: 11px; color: #c92a2a; }
+.wc-mem-md { min-width: 0; padding: 14px 16px; border: 1px solid rgba(127,127,127,.14); border-radius: 10px; font-size: 12.5px; line-height: 1.65; user-select: text; }
+.wc-mem-md > :first-child { margin-top: 0; }
+.wc-mem-md > :last-child { margin-bottom: 0; }
+.wc-md-h1 { font-size: 16px; } .wc-md-h2 { font-size: 14px; } .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { font-size: 13px; }
+.wc-md-h1, .wc-md-h2, .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { margin: 14px 0 6px; font-weight: 600; }
+.wc-md-p { margin: 6px 0; }
+.wc-md-list { margin: 6px 0; padding-left: 20px; }
+.wc-mem-md a { color: #4c8dff; text-decoration: none; }
+.wc-mem-md a:hover { text-decoration: underline; }
+.wc-md-quote { margin: 8px 0; padding: 2px 10px; border-left: 3px solid rgba(127,127,127,.3); opacity: .85; }
+.wc-md-hr { border: 0; border-top: 1px solid rgba(127,127,127,.2); margin: 12px 0; }
+.wc-md-code { padding: 1px 4px; border-radius: 4px; background: rgba(127,127,127,.14); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.wc-md-pre { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: rgba(127,127,127,.09); overflow-x: auto; }
+.wc-md-pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.wc-md-table-wrap { margin: 8px 0; overflow-x: auto; }
+.wc-md-table { border-collapse: collapse; font-size: 12px; }
+.wc-md-table th, .wc-md-table td { padding: 4px 8px; border: 1px solid rgba(127,127,127,.2); }
+.wc-md-table th { background: rgba(127,127,127,.07); font-weight: 600; }
+@media (max-width: 880px) {
+  .wc-mem-grid { grid-template-columns: 1fr; }
+}
 /* 窄屏：导航翻到顶部做横向滚动条，详情独占一行 */
 @media (max-width: 880px) {
   .wc-center-layout { grid-template-columns: 1fr; gap: 14px; }
   .wc-nav { position: static; flex-direction: row; overflow-x: auto; padding-bottom: 2px; }
   .wc-nav-item { flex: none; padding: 6px 10px; font-size: 12px; }
+  .wc-nav-sep { align-self: center; width: 1px; height: 16px; margin: 0 4px; }
 }
 .wc-path { margin: 0 0 12px; font-size: 11px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-sec { margin: 14px 0; }
@@ -1041,7 +1531,7 @@ const STYLE = `
 export default function activate(ctx) {
   const { createElement: h, useEffect, useState, useRef } = ctx.react;
 
-  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true };
+  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "" };
   const subs = new Set();
 
   // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
@@ -1201,6 +1691,47 @@ export default function activate(ctx) {
       set({ error: String((err && err.message) || err) });
     } finally {
       set({ busy: "" });
+    }
+  }
+
+  /* ------------------------------------------------------------ 记忆（只读） */
+
+  // 记忆文件分三类来源，全部只读：定位与读取都在 config-io 里做，
+  // 这里只负责把结果放进 store。写入路径一概没有——自动记忆的增删
+  // 归 Claude 自己维护，插件动它只会破坏索引与正文的一致性。
+  let memSeq = 0;
+
+  async function loadMemory() {
+    const ws = store.ws;
+    if (!ws) return;
+    const seq = ++memSeq;
+    set({ memLoading: true, memError: "" });
+    try {
+      const res = await runIo(["memory", ws]);
+      if (seq !== memSeq) return;
+      // 列表变了之后旧的选中项可能已不存在，顺手清掉，避免右侧还挂着已删文件。
+      const stillThere = store.memFile
+        && (res.files || []).some((f) => f.path === store.memFile.path);
+      set({
+        mem: res,
+        memLoading: false,
+        memFile: stillThere ? store.memFile : null,
+      });
+    } catch (err) {
+      if (seq !== memSeq) return;
+      set({ memLoading: false, memError: String((err && err.message) || err) });
+    }
+  }
+
+  async function openMemoryFile(file) {
+    const ws = store.ws;
+    if (!ws || !file) return;
+    set({ memFileLoading: true, memError: "" });
+    try {
+      const res = await runIo(["memoryRead", ws, file.path]);
+      set({ memFile: res.file, memFileLoading: false });
+    } catch (err) {
+      set({ memFileLoading: false, memError: String((err && err.message) || err) });
     }
   }
 
@@ -1626,6 +2157,104 @@ export default function activate(ctx) {
     );
   }
 
+  // 记忆文件：只读浏览。自动记忆里「CONTEXT.md」这种入口与正文混在一起，
+  // 所以列表统一给出来源标签，正文用共用库的 Markdown 渲染（纯节点，不拼 HTML）。
+  const MEM_SOURCE_LABEL = { auto: "自动记忆", project: "项目", user: "个人全局" };
+
+  function formatTime(ms) {
+    const d = new Date(Number(ms) || 0);
+    if (!isFinite(d.getTime())) return "";
+    const pad = (n) => (n < 10 ? "0" + n : String(n));
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+      + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function MemoryView({ s, onPick, onRefresh }) {
+    const mem = s.mem;
+    const current = s.memFile;
+
+    if (!mem) {
+      return h("div", { className: "wc-mem" },
+        s.memError
+          ? h("p", { className: "wc-err" }, s.memError)
+          : h("p", { className: "wc-empty" }, s.memLoading ? "读取记忆文件…" : "还没有读取。"),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
+          disabled: s.memLoading,
+          onClick: onRefresh,
+        }, s.memLoading ? "读取中…" : "重新读取")
+      );
+    }
+
+    const files = mem.files || [];
+    const fileItem = (f) => h("button", {
+      key: f.path,
+      type: "button",
+      className: "wc-mem-item" + (current && current.path === f.path ? " wc-on" : ""),
+      title: f.path,
+      onClick: () => onPick(f),
+    },
+      h("span", { className: "wc-mem-line1" },
+        h("span", { className: "wc-mem-name" }, f.title || f.name),
+        h("span", { className: "wc-mem-tag wc-mem-tag-" + f.source }, MEM_SOURCE_LABEL[f.source] || f.source)
+      ),
+      h("span", { className: "wc-mem-meta" },
+        f.rel + " · " + formatSize(f.size) + " · " + formatTime(f.mtime))
+    );
+
+    const body = !current
+      ? h("p", { className: "wc-empty" },
+          files.length === 0 ? "这个工作区还没有任何记忆文件。" : "从左侧选择一个文件查看内容。")
+      : h("div", { className: "wc-mem-body" },
+          h("div", { className: "wc-mem-body-head" },
+            h("span", { className: "wc-mem-body-title" }, current.title || current.name),
+            h("span", { className: "wc-mem-tag wc-mem-tag-" + current.source },
+              MEM_SOURCE_LABEL[current.source] || current.source),
+            h("span", { className: "wc-mem-body-meta" }, formatSize(current.size))
+          ),
+          // 路径要能选中复制：用户经常需要拿它去编辑器里改，插件不提供编辑。
+          h("p", { className: "wc-mem-path", title: "只读；修改请用编辑器打开此文件" }, current.path),
+          current.truncated
+            ? h("p", { className: "wc-mem-warn" }, "文件较大，只显示前 512 KB。")
+            : null,
+          h("div", { className: "wc-mem-md wc-md" }, renderMarkdown(h, current.content || "", { prefix: "wc" }))
+        );
+
+    return h("div", { className: "wc-mem" },
+      h("div", { className: "wc-mem-head" },
+        h("span", { className: "wc-mem-count" }, files.length + " 个记忆文件 · 只读"),
+        h("span", { className: "wc-mem-dir", title: mem.autoDir }, mem.slug),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
+          disabled: s.memLoading,
+          onClick: onRefresh,
+        }, s.memLoading ? "读取中…" : "重新读取")
+      ),
+      s.memError ? h("p", { className: "wc-err" }, s.memError) : null,
+      h("div", { className: "wc-mem-grid" },
+        h("div", { className: "wc-mem-list" },
+          files.length === 0
+            ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
+            : files.map(fileItem)
+        ),
+        h("div", { className: "wc-mem-detail" },
+          s.memFileLoading ? h("p", { className: "wc-empty" }, "读取中…") : body
+        )
+      ),
+      h("p", { className: "wc-tip" },
+        "只读。自动记忆由 Claude 自己维护，插件不提供增删改；需要修改请用编辑器打开上面的路径。")
+    );
+  }
+
   // 状态与提交逻辑在共用库 feedback-ui（四插件同一套），这里只把它接到
   // 本插件的网络层与 wc-* 样式上。
   function FeedbackSection() {
@@ -1686,6 +2315,10 @@ export default function activate(ctx) {
           ? h("span", { className: "wc-head-chips" },
               h("span", { className: "wc-chip" },
                 (data.plugins || []).length + " 插件 · " + (data.mcp || []).length + " MCP · " + (data.skills || []).length + " 技能"),
+              // 记忆数只有读过一次才有值，没读过就不显示，免得写个「记忆 0」误导。
+              s.mem
+                ? h("span", { className: "wc-chip" }, "记忆 " + (s.mem.files || []).length)
+                : null,
               overridden > 0
                 ? h("span", { className: "wc-chip wc-chip-accent" }, "覆盖 " + overridden)
                 : null,
@@ -1707,7 +2340,12 @@ export default function activate(ctx) {
           type: "button",
           className: "wc-refresh",
           disabled: s.loading,
-          onClick: () => { if (s.ws) void refresh(s.ws); },
+          onClick: () => {
+            if (!s.ws) return;
+            void refresh(s.ws);
+            // 记忆已经读过一次的话跟着刷新，省得用户再点一次。
+            if (s.mem) void loadMemory();
+          },
         }, s.loading ? "读取中…" : "刷新")
       )
     );
@@ -1734,6 +2372,7 @@ export default function activate(ctx) {
 
     const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
     const current = groups.find((g) => g.key === active);
+    const memActive = s.activeKind === "memory";
 
     if (mode === "center") {
       // 头部拆成两段：标题栏（CenterHeader）常驻，统计/诊断/工具栏随「收起」隐藏。
@@ -1743,7 +2382,8 @@ export default function activate(ctx) {
             "工作区：" + data.workspace + " · 只影响当前工作区，全局配置由 CC Switch 管理。"),
           h(Stats, { data }),
           h(Diagnostics, { data }),
-          h("div", { className: "wc-detail-bar wc-toolbar-row" },
+          // 记忆是只读浏览，没有「当前类别」也没有本地覆盖的概念，工具栏整块不出。
+          memActive ? null : h("div", { className: "wc-detail-bar wc-toolbar-row" },
             h("input", {
               className: "wc-search",
               type: "search",
@@ -1764,7 +2404,7 @@ export default function activate(ctx) {
       const q = String(s.query || "").trim().toLowerCase();
       const only = Boolean(s.onlyOverridden);
       // 搜索与筛选只作用于当前类别：一次只看一类，不存在「搜了三个列表」的歧义。
-      const visible = current.rows.filter((row) =>
+      const visible = memActive ? [] : current.rows.filter((row) =>
         (!q || String(row.name).toLowerCase().includes(q)) &&
         (!only || locallyOverridden(row))
       );
@@ -1773,8 +2413,8 @@ export default function activate(ctx) {
         return h("button", {
           key: g.key,
           type: "button",
-          className: "wc-nav-item" + (active === g.key ? " wc-on" : ""),
-          "aria-current": active === g.key ? "true" : undefined,
+          className: "wc-nav-item" + (active === g.key && !memActive ? " wc-on" : ""),
+          "aria-current": active === g.key && !memActive ? "true" : undefined,
           onClick: () => {
             // 换类别时清掉上一个类别留下的搜索词，避免「切过去一片空白」。
             set({ activeKind: g.key, query: "" });
@@ -1789,24 +2429,47 @@ export default function activate(ctx) {
           )
         );
       };
+      const memCount = s.mem ? (s.mem.files || []).length : 0;
+      const memNav = h("button", {
+        key: "memory",
+        type: "button",
+        className: "wc-nav-item" + (memActive ? " wc-on" : ""),
+        "aria-current": memActive ? "true" : undefined,
+        onClick: () => {
+          set({ activeKind: "memory", query: "" });
+          // 进这个类别才读一次：记忆文件与配置无关，不该拖慢每次扫描。
+          if (!s.mem && !s.memLoading) void loadMemory();
+        },
+      },
+        h("span", { className: "wc-nav-name" }, "记忆"),
+        h("span", { className: "wc-nav-counts" },
+          h("span", { className: "wc-nav-num" }, s.mem ? memCount : "—")
+        )
+      );
       // 左侧导航 + 右侧详情：导航常驻，右侧只渲染当前类别。
       return h("div", { className: "wc-body" },
         h("div", { className: "wc-center-layout" },
-          h("nav", { className: "wc-nav", "aria-label": "配置类别" }, groups.map(navItem)),
+          h("nav", { className: "wc-nav", "aria-label": "配置类别" },
+            groups.map(navItem),
+            h("div", { className: "wc-nav-sep", "aria-hidden": "true" }),
+            memNav
+          ),
           h("div", { className: "wc-detail" },
-            h(Section, {
-              title: current.title + "（" + current.rows.length + "）",
-              rows: visible,
-              empty: q || only ? "没有匹配的项" : current.empty,
-              compact: false,
-              foldLocked: current.fold,
-              showDesc: s.showDesc,
-              action: h(BulkBar, {
-                rows: current.rows,
-                filtered: visible,
-                busy: s.busy === "many",
-              }),
-            })
+            memActive
+              ? h(MemoryView, { s, onPick: openMemoryFile, onRefresh: () => { void loadMemory(); } })
+              : h(Section, {
+                  title: current.title + "（" + current.rows.length + "）",
+                  rows: visible,
+                  empty: q || only ? "没有匹配的项" : current.empty,
+                  compact: false,
+                  foldLocked: current.fold,
+                  showDesc: s.showDesc,
+                  action: h(BulkBar, {
+                    rows: current.rows,
+                    filtered: visible,
+                    busy: s.busy === "many",
+                  }),
+                })
           )
         ),
         tip
@@ -1860,7 +2523,8 @@ export default function activate(ctx) {
     const scrollRef = useRef(null);
     useEffect(() => {
       const ws = workspacePath || "";
-      set({ ws, data: null, error: "", note: "" });
+      // 换工作区时记忆列表必须一起作废，否则会显示上一个工作区的文件。
+      set({ ws, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
       if (ws) void refresh(ws);
     }, [workspacePath]);
     // 切页内页签时回到顶部：换了类别还停在上一类的滚动位置，
@@ -1925,7 +2589,7 @@ export default function activate(ctx) {
                     className: "wc-pick",
                     onClick: () => {
                       if (!row.path) return;
-                      set({ ws: row.path, data: null, error: "", note: "" });
+                      set({ ws: row.path, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
                       void refresh(row.path);
                     },
                   },

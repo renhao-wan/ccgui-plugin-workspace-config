@@ -83,11 +83,56 @@ const STYLE = `
 .wc-nav-item:not(.wc-on) .wc-nav-badge { background: rgba(79,140,255,.12); opacity: .8; }
 .wc-detail { min-width: 0; }
 .wc-detail .wc-sec { margin: 0; }
+/* 记忆属于「看」而不是「改」，和三类开关之间拉一条分隔线，避免误读成一个开关类别 */
+.wc-nav-sep { height: 1px; margin: 8px 6px; background: rgba(127,127,127,.16); }
+.wc-mem { display: flex; flex-direction: column; gap: 10px; }
+.wc-mem-head { display: flex; align-items: center; gap: 10px; }
+.wc-mem-count { font-size: 12px; font-weight: 600; }
+.wc-mem-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .45; }
+.wc-mem-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; align-items: start; }
+.wc-mem-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wc-mem-item { display: flex; flex-direction: column; gap: 2px; font: inherit; text-align: left; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
+.wc-mem-item:hover { background: rgba(127,127,127,.06); }
+.wc-mem-item.wc-on { background: rgba(79,140,255,.12); }
+.wc-mem-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wc-mem-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.wc-mem-meta { font-size: 10.5px; opacity: .45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-mem-tag { flex: none; padding: 0 6px; border-radius: 999px; font-size: 10.5px; line-height: 16px; background: rgba(127,127,127,.1); opacity: .8; }
+.wc-mem-tag-auto { background: rgba(79,140,255,.16); opacity: 1; }
+.wc-mem-tag-project { background: rgba(46,160,67,.16); opacity: 1; }
+.wc-mem-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.wc-mem-body-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wc-mem-body-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-mem-body-meta { margin-left: auto; flex: none; font-size: 11px; opacity: .45; }
+.wc-mem-path { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; opacity: .55; word-break: break-all; user-select: text; }
+.wc-mem-warn { margin: 0; font-size: 11px; color: #c92a2a; }
+.wc-mem-md { min-width: 0; padding: 14px 16px; border: 1px solid rgba(127,127,127,.14); border-radius: 10px; font-size: 12.5px; line-height: 1.65; user-select: text; }
+.wc-mem-md > :first-child { margin-top: 0; }
+.wc-mem-md > :last-child { margin-bottom: 0; }
+.wc-md-h1 { font-size: 16px; } .wc-md-h2 { font-size: 14px; } .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { font-size: 13px; }
+.wc-md-h1, .wc-md-h2, .wc-md-h3, .wc-md-h4, .wc-md-h5, .wc-md-h6 { margin: 14px 0 6px; font-weight: 600; }
+.wc-md-p { margin: 6px 0; }
+.wc-md-list { margin: 6px 0; padding-left: 20px; }
+.wc-mem-md a { color: #4c8dff; text-decoration: none; }
+.wc-mem-md a:hover { text-decoration: underline; }
+.wc-md-quote { margin: 8px 0; padding: 2px 10px; border-left: 3px solid rgba(127,127,127,.3); opacity: .85; }
+.wc-md-hr { border: 0; border-top: 1px solid rgba(127,127,127,.2); margin: 12px 0; }
+.wc-md-code { padding: 1px 4px; border-radius: 4px; background: rgba(127,127,127,.14); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.wc-md-pre { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: rgba(127,127,127,.09); overflow-x: auto; }
+.wc-md-pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.wc-md-table-wrap { margin: 8px 0; overflow-x: auto; }
+.wc-md-table { border-collapse: collapse; font-size: 12px; }
+.wc-md-table th, .wc-md-table td { padding: 4px 8px; border: 1px solid rgba(127,127,127,.2); }
+.wc-md-table th { background: rgba(127,127,127,.07); font-weight: 600; }
+@media (max-width: 880px) {
+  .wc-mem-grid { grid-template-columns: 1fr; }
+}
 /* 窄屏：导航翻到顶部做横向滚动条，详情独占一行 */
 @media (max-width: 880px) {
   .wc-center-layout { grid-template-columns: 1fr; gap: 14px; }
   .wc-nav { position: static; flex-direction: row; overflow-x: auto; padding-bottom: 2px; }
   .wc-nav-item { flex: none; padding: 6px 10px; font-size: 12px; }
+  .wc-nav-sep { align-self: center; width: 1px; height: 16px; margin: 0 4px; }
 }
 .wc-path { margin: 0 0 12px; font-size: 11px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-sec { margin: 14px 0; }
@@ -205,7 +250,7 @@ const STYLE = `
 export default function activate(ctx) {
   const { createElement: h, useEffect, useState, useRef } = ctx.react;
 
-  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true };
+  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "" };
   const subs = new Set();
 
   // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
@@ -365,6 +410,47 @@ export default function activate(ctx) {
       set({ error: String((err && err.message) || err) });
     } finally {
       set({ busy: "" });
+    }
+  }
+
+  /* ------------------------------------------------------------ 记忆（只读） */
+
+  // 记忆文件分三类来源，全部只读：定位与读取都在 config-io 里做，
+  // 这里只负责把结果放进 store。写入路径一概没有——自动记忆的增删
+  // 归 Claude 自己维护，插件动它只会破坏索引与正文的一致性。
+  let memSeq = 0;
+
+  async function loadMemory() {
+    const ws = store.ws;
+    if (!ws) return;
+    const seq = ++memSeq;
+    set({ memLoading: true, memError: "" });
+    try {
+      const res = await runIo(["memory", ws]);
+      if (seq !== memSeq) return;
+      // 列表变了之后旧的选中项可能已不存在，顺手清掉，避免右侧还挂着已删文件。
+      const stillThere = store.memFile
+        && (res.files || []).some((f) => f.path === store.memFile.path);
+      set({
+        mem: res,
+        memLoading: false,
+        memFile: stillThere ? store.memFile : null,
+      });
+    } catch (err) {
+      if (seq !== memSeq) return;
+      set({ memLoading: false, memError: String((err && err.message) || err) });
+    }
+  }
+
+  async function openMemoryFile(file) {
+    const ws = store.ws;
+    if (!ws || !file) return;
+    set({ memFileLoading: true, memError: "" });
+    try {
+      const res = await runIo(["memoryRead", ws, file.path]);
+      set({ memFile: res.file, memFileLoading: false });
+    } catch (err) {
+      set({ memFileLoading: false, memError: String((err && err.message) || err) });
     }
   }
 
@@ -790,6 +876,104 @@ export default function activate(ctx) {
     );
   }
 
+  // 记忆文件：只读浏览。自动记忆里「CONTEXT.md」这种入口与正文混在一起，
+  // 所以列表统一给出来源标签，正文用共用库的 Markdown 渲染（纯节点，不拼 HTML）。
+  const MEM_SOURCE_LABEL = { auto: "自动记忆", project: "项目", user: "个人全局" };
+
+  function formatTime(ms) {
+    const d = new Date(Number(ms) || 0);
+    if (!isFinite(d.getTime())) return "";
+    const pad = (n) => (n < 10 ? "0" + n : String(n));
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+      + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function MemoryView({ s, onPick, onRefresh }) {
+    const mem = s.mem;
+    const current = s.memFile;
+
+    if (!mem) {
+      return h("div", { className: "wc-mem" },
+        s.memError
+          ? h("p", { className: "wc-err" }, s.memError)
+          : h("p", { className: "wc-empty" }, s.memLoading ? "读取记忆文件…" : "还没有读取。"),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
+          disabled: s.memLoading,
+          onClick: onRefresh,
+        }, s.memLoading ? "读取中…" : "重新读取")
+      );
+    }
+
+    const files = mem.files || [];
+    const fileItem = (f) => h("button", {
+      key: f.path,
+      type: "button",
+      className: "wc-mem-item" + (current && current.path === f.path ? " wc-on" : ""),
+      title: f.path,
+      onClick: () => onPick(f),
+    },
+      h("span", { className: "wc-mem-line1" },
+        h("span", { className: "wc-mem-name" }, f.title || f.name),
+        h("span", { className: "wc-mem-tag wc-mem-tag-" + f.source }, MEM_SOURCE_LABEL[f.source] || f.source)
+      ),
+      h("span", { className: "wc-mem-meta" },
+        f.rel + " · " + formatSize(f.size) + " · " + formatTime(f.mtime))
+    );
+
+    const body = !current
+      ? h("p", { className: "wc-empty" },
+          files.length === 0 ? "这个工作区还没有任何记忆文件。" : "从左侧选择一个文件查看内容。")
+      : h("div", { className: "wc-mem-body" },
+          h("div", { className: "wc-mem-body-head" },
+            h("span", { className: "wc-mem-body-title" }, current.title || current.name),
+            h("span", { className: "wc-mem-tag wc-mem-tag-" + current.source },
+              MEM_SOURCE_LABEL[current.source] || current.source),
+            h("span", { className: "wc-mem-body-meta" }, formatSize(current.size))
+          ),
+          // 路径要能选中复制：用户经常需要拿它去编辑器里改，插件不提供编辑。
+          h("p", { className: "wc-mem-path", title: "只读；修改请用编辑器打开此文件" }, current.path),
+          current.truncated
+            ? h("p", { className: "wc-mem-warn" }, "文件较大，只显示前 512 KB。")
+            : null,
+          h("div", { className: "wc-mem-md wc-md" }, renderMarkdown(h, current.content || "", { prefix: "wc" }))
+        );
+
+    return h("div", { className: "wc-mem" },
+      h("div", { className: "wc-mem-head" },
+        h("span", { className: "wc-mem-count" }, files.length + " 个记忆文件 · 只读"),
+        h("span", { className: "wc-mem-dir", title: mem.autoDir }, mem.slug),
+        h("button", {
+          type: "button",
+          className: "wc-refresh",
+          disabled: s.memLoading,
+          onClick: onRefresh,
+        }, s.memLoading ? "读取中…" : "重新读取")
+      ),
+      s.memError ? h("p", { className: "wc-err" }, s.memError) : null,
+      h("div", { className: "wc-mem-grid" },
+        h("div", { className: "wc-mem-list" },
+          files.length === 0
+            ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
+            : files.map(fileItem)
+        ),
+        h("div", { className: "wc-mem-detail" },
+          s.memFileLoading ? h("p", { className: "wc-empty" }, "读取中…") : body
+        )
+      ),
+      h("p", { className: "wc-tip" },
+        "只读。自动记忆由 Claude 自己维护，插件不提供增删改；需要修改请用编辑器打开上面的路径。")
+    );
+  }
+
   // 状态与提交逻辑在共用库 feedback-ui（四插件同一套），这里只把它接到
   // 本插件的网络层与 wc-* 样式上。
   function FeedbackSection() {
@@ -850,6 +1034,10 @@ export default function activate(ctx) {
           ? h("span", { className: "wc-head-chips" },
               h("span", { className: "wc-chip" },
                 (data.plugins || []).length + " 插件 · " + (data.mcp || []).length + " MCP · " + (data.skills || []).length + " 技能"),
+              // 记忆数只有读过一次才有值，没读过就不显示，免得写个「记忆 0」误导。
+              s.mem
+                ? h("span", { className: "wc-chip" }, "记忆 " + (s.mem.files || []).length)
+                : null,
               overridden > 0
                 ? h("span", { className: "wc-chip wc-chip-accent" }, "覆盖 " + overridden)
                 : null,
@@ -871,7 +1059,12 @@ export default function activate(ctx) {
           type: "button",
           className: "wc-refresh",
           disabled: s.loading,
-          onClick: () => { if (s.ws) void refresh(s.ws); },
+          onClick: () => {
+            if (!s.ws) return;
+            void refresh(s.ws);
+            // 记忆已经读过一次的话跟着刷新，省得用户再点一次。
+            if (s.mem) void loadMemory();
+          },
         }, s.loading ? "读取中…" : "刷新")
       )
     );
@@ -898,6 +1091,7 @@ export default function activate(ctx) {
 
     const active = groups.some((g) => g.key === s.activeKind) ? s.activeKind : "plugin";
     const current = groups.find((g) => g.key === active);
+    const memActive = s.activeKind === "memory";
 
     if (mode === "center") {
       // 头部拆成两段：标题栏（CenterHeader）常驻，统计/诊断/工具栏随「收起」隐藏。
@@ -907,7 +1101,8 @@ export default function activate(ctx) {
             "工作区：" + data.workspace + " · 只影响当前工作区，全局配置由 CC Switch 管理。"),
           h(Stats, { data }),
           h(Diagnostics, { data }),
-          h("div", { className: "wc-detail-bar wc-toolbar-row" },
+          // 记忆是只读浏览，没有「当前类别」也没有本地覆盖的概念，工具栏整块不出。
+          memActive ? null : h("div", { className: "wc-detail-bar wc-toolbar-row" },
             h("input", {
               className: "wc-search",
               type: "search",
@@ -928,7 +1123,7 @@ export default function activate(ctx) {
       const q = String(s.query || "").trim().toLowerCase();
       const only = Boolean(s.onlyOverridden);
       // 搜索与筛选只作用于当前类别：一次只看一类，不存在「搜了三个列表」的歧义。
-      const visible = current.rows.filter((row) =>
+      const visible = memActive ? [] : current.rows.filter((row) =>
         (!q || String(row.name).toLowerCase().includes(q)) &&
         (!only || locallyOverridden(row))
       );
@@ -937,8 +1132,8 @@ export default function activate(ctx) {
         return h("button", {
           key: g.key,
           type: "button",
-          className: "wc-nav-item" + (active === g.key ? " wc-on" : ""),
-          "aria-current": active === g.key ? "true" : undefined,
+          className: "wc-nav-item" + (active === g.key && !memActive ? " wc-on" : ""),
+          "aria-current": active === g.key && !memActive ? "true" : undefined,
           onClick: () => {
             // 换类别时清掉上一个类别留下的搜索词，避免「切过去一片空白」。
             set({ activeKind: g.key, query: "" });
@@ -953,24 +1148,47 @@ export default function activate(ctx) {
           )
         );
       };
+      const memCount = s.mem ? (s.mem.files || []).length : 0;
+      const memNav = h("button", {
+        key: "memory",
+        type: "button",
+        className: "wc-nav-item" + (memActive ? " wc-on" : ""),
+        "aria-current": memActive ? "true" : undefined,
+        onClick: () => {
+          set({ activeKind: "memory", query: "" });
+          // 进这个类别才读一次：记忆文件与配置无关，不该拖慢每次扫描。
+          if (!s.mem && !s.memLoading) void loadMemory();
+        },
+      },
+        h("span", { className: "wc-nav-name" }, "记忆"),
+        h("span", { className: "wc-nav-counts" },
+          h("span", { className: "wc-nav-num" }, s.mem ? memCount : "—")
+        )
+      );
       // 左侧导航 + 右侧详情：导航常驻，右侧只渲染当前类别。
       return h("div", { className: "wc-body" },
         h("div", { className: "wc-center-layout" },
-          h("nav", { className: "wc-nav", "aria-label": "配置类别" }, groups.map(navItem)),
+          h("nav", { className: "wc-nav", "aria-label": "配置类别" },
+            groups.map(navItem),
+            h("div", { className: "wc-nav-sep", "aria-hidden": "true" }),
+            memNav
+          ),
           h("div", { className: "wc-detail" },
-            h(Section, {
-              title: current.title + "（" + current.rows.length + "）",
-              rows: visible,
-              empty: q || only ? "没有匹配的项" : current.empty,
-              compact: false,
-              foldLocked: current.fold,
-              showDesc: s.showDesc,
-              action: h(BulkBar, {
-                rows: current.rows,
-                filtered: visible,
-                busy: s.busy === "many",
-              }),
-            })
+            memActive
+              ? h(MemoryView, { s, onPick: openMemoryFile, onRefresh: () => { void loadMemory(); } })
+              : h(Section, {
+                  title: current.title + "（" + current.rows.length + "）",
+                  rows: visible,
+                  empty: q || only ? "没有匹配的项" : current.empty,
+                  compact: false,
+                  foldLocked: current.fold,
+                  showDesc: s.showDesc,
+                  action: h(BulkBar, {
+                    rows: current.rows,
+                    filtered: visible,
+                    busy: s.busy === "many",
+                  }),
+                })
           )
         ),
         tip
@@ -1024,7 +1242,8 @@ export default function activate(ctx) {
     const scrollRef = useRef(null);
     useEffect(() => {
       const ws = workspacePath || "";
-      set({ ws, data: null, error: "", note: "" });
+      // 换工作区时记忆列表必须一起作废，否则会显示上一个工作区的文件。
+      set({ ws, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
       if (ws) void refresh(ws);
     }, [workspacePath]);
     // 切页内页签时回到顶部：换了类别还停在上一类的滚动位置，
@@ -1089,7 +1308,7 @@ export default function activate(ctx) {
                     className: "wc-pick",
                     onClick: () => {
                       if (!row.path) return;
-                      set({ ws: row.path, data: null, error: "", note: "" });
+                      set({ ws: row.path, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
                       void refresh(row.path);
                     },
                   },

@@ -104,11 +104,12 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | `<ws>/.mcp.json` | project MCP |
 | `<ws>/.claude/settings.json` | 团队配置（只读，用于展示冲突） |
 | `<ws>/.claude/settings.local.json` | 读写目标 |
+| `~/.claude/projects/<slug>/memory/*.md` | 自动记忆（只读浏览，见 6.4） |
 
 ## 6. UI
 
 - **右侧 panel tab**：跟随 `workspacePath`，紧凑列表 + 三态分段控件；三个类别用页内页签切换，页签条固定在滚动区外（列表再长也不会把切换器顶走）
-- **中央 center tab**：同一 store 的宽视图，**左侧导航 + 右侧详情**——一次只看一类（插件 / MCP / 技能），不会再有三块列表同时出现；左导航每项带总数，有本地覆盖时追加覆盖数徽标；搜索与「只看本地覆盖」只作用于当前类别，切类别会清空搜索词；窄屏（<880px）导航翻到顶部变成横向滚动条。需先在右侧面板激活一次工作区
+- **中央 center tab**：同一 store 的宽视图，**左侧导航 + 右侧详情**——一次只看一类（插件 / MCP / 技能 / 记忆），不会再有三块列表同时出现；左导航每项带总数，有本地覆盖时追加覆盖数徽标；搜索与「只看本地覆盖」只作用于当前类别，切类别会清空搜索词；窄屏（<880px）导航翻到顶部变成横向滚动条。需先在右侧面板激活一次工作区
 - 每行显示：名称、来源元信息（市场 / scope / personal|project|plugin）、三态控件
 - plugin 技能行显示「由插件控制」徽标
 - 保存后提示生效方式：插件 `/reload-plugins`，MCP 与技能新会话
@@ -150,6 +151,29 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 
 数据全部来自 `scan` 已有的四个状态字段，纯展示。侧栏（`compact`）不提供展开，保持简洁。
 
+### 6.4 记忆浏览（只读）
+
+中央页签左侧导航第 4 项，与三个开关类别用分隔线隔开——它是「看」而不是「改」。
+
+| source | 位置 | 说明 |
+|---|---|---|
+| `auto` | `~/.claude/projects/<slug>/memory/*.md` | Claude 自己维护的自动记忆；`MEMORY.md` 是索引，排最前 |
+| `project` | `<ws>/CLAUDE.md`、`<ws>/.claude/CLAUDE.md`、上级目录链、`<ws>/.claude/rules/*.md` | 项目规则，向上最多 12 层 |
+| `user` | `~/.claude/CLAUDE.md` | 个人全局 |
+
+`<slug>` 由工作区绝对路径里所有非字母数字字符逐一替换成 `-` 得到（`D--projects-plugins-notes-cc-wrapped`）。
+
+链路仍是 `exec:node`，新增两个只读动作：
+
+```
+node config-io.mjs memory    <workspace>        列出全部记忆文件（含标题、描述、大小、mtime）
+node config-io.mjs memoryRead <workspace> <path> 读正文
+```
+
+`memoryRead` 会**重新收集一遍列表**并只认自己列出来的绝对路径，所以这个动作无法被用来读任意文件（冒烟里断言了 `~/.claude/settings.json` 读不到）。正文用共用库 `markdown` / `markdown-view` 渲染成节点，全程不拼 HTML；超过 512 KB 只显示前 512 KB 并标注。
+
+只读是设计边界，不是暂未实现：自动记忆的索引与正文由 Claude 维护，外部增删会造成「索引有条目、文件已不存在」这类不一致，插件不去碰。需要改就直接用编辑器打开界面上给出的绝对路径。
+
 ## 7. 已知限制
 
 1. ~~`skillOverrides` 的跨层合并需实测~~ 已实测（Claude Code 2.1.319）：项目层 `on` 能压过 user 层 `off`，双向成立，团队层同样参与
@@ -161,4 +185,4 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 ## 8. 测试
 
 - 11 条纯逻辑单测：三态读写、空键清理、保留非托管键、生效态
-- 111 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开
+- 164 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写

@@ -378,6 +378,175 @@ function scan(ws) {
   };
 }
 
+/* ---------------- 记忆文件（只读） ---------------- */
+
+// Claude Code 按工作区路径生成会话目录名：非字母数字一律变 -。
+// D:\projects\notes\cc-wrapped → D--projects-notes-cc-wrapped
+function memorySlug(ws) {
+  return path.resolve(ws).replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/** 从 frontmatter / 一级标题里取展示用的标题与描述。只读文件开头。 */
+function readMemoryMeta(file) {
+  const base = path.basename(file, ".md");
+  try {
+    const head = fs.readFileSync(file, "utf8").slice(0, 8192);
+    let description = "";
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(head);
+    if (fm) {
+      const line = /^description:\s*(.+)$/m.exec(fm[1]);
+      if (line) description = line[1].trim().replace(/^["']|["']$/g, "");
+    }
+    const h1 = /^#\s+(.+)$/m.exec(head);
+    return { title: h1 ? h1[1].trim() : base, description };
+  } catch {
+    return { title: base, description: "" };
+  }
+}
+
+/**
+ * 收集当前工作区相关的全部记忆文件，只读不改。
+ *
+ * 三类来源：
+ *   auto     ~/.claude/projects/<slug>/memory/*.md（Claude 自己维护）
+ *   project  <ws>/CLAUDE.md、<ws>/.claude/CLAUDE.md，以及上级目录链上的 CLAUDE.md
+ *   user     ~/.claude/CLAUDE.md
+ *
+ * 返回的 path 是绝对路径，随后 memoryRead 会重新收集一遍并只认这个白名单，
+ * 所以外部无法借这个动作读任意文件。
+ */
+function collectMemory(ws) {
+  const files = [];
+  const seen = new Set();
+
+  const push = (source, root, file) => {
+    const abs = path.resolve(file);
+    if (seen.has(abs)) return;
+    let st;
+    try {
+      st = fs.statSync(abs);
+    } catch {
+      return;
+    }
+    if (!st.isFile()) return;
+    seen.add(abs);
+    const meta = readMemoryMeta(abs);
+    // 展示路径：在 root 之内就相对 root，否则相对 HOME（避免三个同名
+    // CLAUDE.md 排在一起分不清是工作区里的还是全局的）。
+    let rel = path.relative(root, abs).replace(/\\/g, "/");
+    if (!rel || rel.startsWith("..")) {
+      const fromHome = path.relative(HOME, abs).replace(/\\/g, "/");
+      rel = fromHome.startsWith("..") ? abs.replace(/\\/g, "/") : "~/" + fromHome;
+    }
+    files.push({
+      source,
+      name: path.basename(abs),
+      rel,
+      path: abs,
+      title: meta.title,
+      description: meta.description,
+      size: st.size,
+      mtime: st.mtimeMs,
+    });
+  };
+
+  // 项目记忆：Claude Code 会从工作区向上逐级读取 CLAUDE.md。
+  // 层级限死，避免磁盘根目录上的杂项被算进来。
+  let dir = path.resolve(ws);
+  for (let depth = 0; depth < 12; depth++) {
+    push("project", dir, path.join(dir, "CLAUDE.md"));
+    push("project", dir, path.join(dir, ".claude", "CLAUDE.md"));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // 新版 Claude Code 的项目规则目录，存在就一并列出。
+  const rulesDir = path.join(path.resolve(ws), ".claude", "rules");
+  try {
+    for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        push("project", path.resolve(ws), path.join(rulesDir, entry.name));
+      }
+    }
+  } catch {
+    // 没有 rules 目录是常态
+  }
+
+  push("user", CLAUDE_DIR, path.join(CLAUDE_DIR, "CLAUDE.md"));
+
+  const autoDir = path.join(CLAUDE_DIR, "projects", memorySlug(ws), "memory");
+  try {
+    for (const entry of fs.readdirSync(autoDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        push("auto", autoDir, path.join(autoDir, entry.name));
+      }
+    }
+  } catch {
+    // 这个工作区还没有自动记忆，目录不存在是正常的
+  }
+
+  // 自动记忆里 MEMORY.md 是索引，排最前；其余按修改时间倒序。
+  const order = { auto: 0, project: 1, user: 2 };
+  files.sort((a, b) => {
+    if (order[a.source] !== order[b.source]) return order[a.source] - order[b.source];
+    if (a.source === "auto") {
+      if (a.name === "MEMORY.md") return -1;
+      if (b.name === "MEMORY.md") return 1;
+      return b.mtime - a.mtime;
+    }
+    return a.rel.localeCompare(b.rel);
+  });
+
+  return {
+    ok: true,
+    workspace: path.resolve(ws),
+    slug: memorySlug(ws),
+    autoDir,
+    autoExists: files.some((f) => f.source === "auto"),
+    files,
+  };
+}
+
+const MEMORY_READ_LIMIT = 512 * 1024;
+
+function readMemory(ws, target) {
+  const list = collectMemory(ws);
+  const file = list.files.find((f) => f.path === path.resolve(String(target || "")));
+  if (!file) throw new Error("记忆文件不存在，或不在可读范围内");
+  const raw = fs.readFileSync(file.path, "utf8");
+  // 字节数与列表里的 size 用同一口径（stat 的 size 就是 UTF-8 字节数）；
+  // 用 raw.length 会按 UTF-16 计数，中文文件在列表和正文里显示成两个数字。
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const truncated = bytes > MEMORY_READ_LIMIT;
+  let content = raw;
+  if (truncated) {
+    // 按字符累加字节截断：直接切 Buffer 会把多字节字符拦腰截断，
+    // 末尾变成一个乱码替换符。
+    let used = 0;
+    let cut = 0;
+    for (const ch of raw) {
+      const size = Buffer.byteLength(ch, "utf8");
+      if (used + size > MEMORY_READ_LIMIT) break;
+      used += size;
+      cut += ch.length;
+    }
+    content = raw.slice(0, cut);
+  }
+  return {
+    ok: true,
+    file: {
+      source: file.source,
+      name: file.name,
+      rel: file.rel,
+      path: file.path,
+      title: file.title,
+      size: file.size,
+      truncated,
+      content,
+    },
+  };
+}
+
 function set(ws, kind, id, state) {
   const localPath = path.join(ws, PROJECT_SETTINGS_REL);
   const current = readJson(localPath) || {};
@@ -428,9 +597,13 @@ function main() {
     return;
   }
   const [, , kind, id, state] = argv;
-  if (!action || !ws) throw new Error("用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state>");
+  if (!action || !ws) throw new Error("用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state> | memory <workspace> | memoryRead <workspace> <file>");
   if (!fs.existsSync(ws)) throw new Error("工作区不存在：" + ws);
-  const result = action === "scan" ? scan(ws) : action === "set" ? set(ws, kind, id, state) : null;
+  let result = null;
+  if (action === "scan") result = scan(ws);
+  else if (action === "set") result = set(ws, kind, id, state);
+  else if (action === "memory") result = collectMemory(ws);
+  else if (action === "memoryRead") result = readMemory(ws, argv[2]);
   if (!result) throw new Error("未知动作：" + action);
   process.stdout.write(JSON.stringify(result));
 }

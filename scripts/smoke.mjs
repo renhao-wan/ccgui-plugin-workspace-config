@@ -1,6 +1,20 @@
 // 冒烟测试：从构建产物 main.js 里取出内联的 config-io 脚本，落盘后真实执行。
 // 用临时 HOME 造一套 ~/.claude fixture，验证 scan / set，并确认全局文件没被改动。
-import assert from "node:assert/strict";
+import nodeAssert from "node:assert/strict";
+
+// 计数包装：原来的 checks 是手写死的数字，加断言时总会忘记同步，
+// 报出来的数就不代表实际覆盖了。这里按调用次数统计。
+let checks = 0;
+const assert = new Proxy(nodeAssert, {
+  get(target, prop) {
+    const value = target[prop];
+    if (typeof value !== "function") return value;
+    return (...args) => {
+      checks += 1;
+      return value.apply(target, args);
+    };
+  },
+});
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -249,6 +263,56 @@ const afterClean = JSON.parse(fs.readFileSync(localPath, "utf8"));
 assert.deepEqual(afterClean, {}, "清理后不应留下空键");
 assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").length, 0);
 
+/* ------------------------------------------------------------ 记忆（只读） */
+
+// 自动记忆目录按 slug 定位：工作区路径里的非字母数字全部变 -。
+// 这里造一份与登记路径对应的 fixture，验证列表、正文与「不可读外部文件」。
+const slug = ws.replace(/[^a-zA-Z0-9]/g, "-");
+const memDir = path.join(claude, "projects", slug, "memory");
+fs.mkdirSync(memDir, { recursive: true });
+fs.writeFileSync(
+  path.join(memDir, "MEMORY.md"),
+  "# 索引\n\n- [a](alpha-note.md) — 第一条\n",
+);
+fs.writeFileSync(
+  path.join(memDir, "alpha-note.md"),
+  "---\nname: alpha-note\ndescription: 一条测试记忆\n---\n\n## 小标题\n\n正文 **加粗** 与 `code`\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+);
+fs.writeFileSync(path.join(ws, "CLAUDE.md"), "# 项目说明\n\n只有一行。\n");
+fs.writeFileSync(path.join(claude, "CLAUDE.md"), "# 全局说明\n");
+
+const mem = run(["memory", ws]);
+assert.equal(mem.ok, true);
+assert.equal(mem.slug, slug, "记忆目录 slug 应由工作区路径逐字派生");
+const memSources = mem.files.map((f) => f.source + ":" + f.name);
+assert.ok(memSources.includes("auto:MEMORY.md"), "自动记忆的 MEMORY.md 应被列出");
+assert.ok(memSources.includes("auto:alpha-note.md"), "自动记忆正文文件应被列出");
+assert.ok(memSources.includes("project:CLAUDE.md"), "工作区 CLAUDE.md 应被列为项目记忆");
+assert.ok(memSources.includes("user:CLAUDE.md"), "全局 CLAUDE.md 应被列为个人记忆");
+assert.equal(mem.files[0].name, "MEMORY.md", "自动记忆的索引文件应排在第一位");
+const noteEntry = mem.files.find((f) => f.name === "alpha-note.md");
+assert.equal(noteEntry.title, "alpha-note", "标题应取一级标题或 frontmatter 的 name");
+assert.equal(noteEntry.description, "一条测试记忆", "描述应取自 frontmatter");
+assert.ok(noteEntry.mtime > 0, "记忆文件要带修改时间");
+
+const noteRead = run(["memoryRead", ws, noteEntry.path]);
+assert.equal(noteRead.ok, true);
+assert.match(noteRead.file.content, /正文/, "读取应返回文件正文");
+assert.equal(noteRead.file.truncated, false);
+assert.equal(noteRead.file.title, "alpha-note");
+assert.equal(noteRead.file.size, noteEntry.size, "正文里的 size 与列表口径必须一致");
+
+// 白名单之外的文件不能被读：这个动作不能变成任意文件读取通道。
+const outside = runSoft(["memoryRead", ws, path.join(claude, "settings.json")]);
+assert.equal(outside.ok, false, "白名单外的文件必须拒绝读取");
+
+// 没有自动记忆的工作区：列表为空但不报错。
+const bareWs = path.join(tmp, "bare-workspace");
+fs.mkdirSync(bareWs, { recursive: true });
+const bareMem = run(["memory", bareWs]);
+assert.equal(bareMem.ok, true);
+assert.equal(bareMem.files.some((f) => f.source === "auto"), false, "没有自动记忆时不应编造条目");
+
 /* ------------------------------------------------------------ UI 渲染 */
 
 // UI 段之前留一条有效覆盖：导航的「覆盖数」徽标需要有真实数据才测得出来。
@@ -389,7 +453,8 @@ fs.writeFileSync(localPath, JSON.stringify({
   // 左导航 + 右详情：一次只渲染一类，不会三块列表同时出现。
   assert.equal(byClassAll(centerTree, "wc-center-layout").length, 1, "中央页签没有左导航布局");
   assert.equal(byClassAll(centerTree, "wc-nav").length, 1, "中央页签没有左侧导航");
-  assert.equal(byClassAll(centerTree, "wc-nav-item").length, 3, "左侧导航应有三个类别");
+  // 三类开关 + 记忆：记忆是只读浏览，但同样挂在左侧导航上。
+  assert.equal(byClassAll(centerTree, "wc-nav-item").length, 4, "左侧导航应有三个类别加记忆");
   assert.equal(byClassAll(centerTree, "wc-detail").length, 1, "中央页签没有右侧详情区");
   assert.equal(byClassAll(centerTree, "wc-col").length, 0, "三列布局应已移除");
   assert.equal(byClassAll(centerTree, "wc-grid").length, 0, "三列网格应已移除");
@@ -404,7 +469,7 @@ fs.writeFileSync(localPath, JSON.stringify({
   assert.match(navText, /插件/, "导航缺少插件项");
   assert.match(navText, /MCP/, "导航缺少 MCP 项");
   assert.match(navText, /技能/, "导航缺少技能项");
-  assert.equal(byClassAll(centerTree, "wc-nav-num").length, 3, "三个导航项都要有数量");
+  assert.equal(byClassAll(centerTree, "wc-nav-num").length, 4, "四个导航项都要有数量");
   assert.ok(byClassAll(centerTree, "wc-nav-badge").length >= 1, "有本地覆盖时导航应显示覆盖数徽标");
   assert.ok(!centerText.includes("undefined"), "中央页签文案里出现了 undefined");
   // 诊断为空时，文案里也不该出现「诊断」。
@@ -475,11 +540,56 @@ fs.writeFileSync(localPath, JSON.stringify({
   assert.match(chips, /覆盖/, "有本地覆盖时收起态应显示覆盖数");
   assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.headCollapsed, true, "收起状态没有持久化");
   // 收起后列表照常可用
-  assert.ok(byClassAll(centerTree, "wc-nav-item").length === 3, "收起后左侧导航应完整保留");
+  assert.ok(byClassAll(centerTree, "wc-nav-item").length === 4, "收起后左侧导航应完整保留");
   assert.ok(byClassAll(centerTree, "wc-row").length > 0, "收起后列表应照常渲染");
   byClassAll(centerTree, "wc-icon-btn")[0].props.onClick();
   centerTree = R.renderKeep(Center, {});
   assert.equal(byClassAll(centerTree, "wc-stats").length, 1, "再次点击应展开回统计区");
+
+  // 记忆：左侧导航第 4 项，进去才读一次列表；选中文件后用 Markdown 渲染正文。
+  const memNav = byClassAll(centerTree, "wc-nav-item").find((n) => textOf(n).includes("记忆"));
+  assert.ok(memNav, "左侧导航没有记忆项");
+  memNav.props.onClick();
+  for (let i = 0; i < 40; i++) {
+    if (byClassAll(centerTree, "wc-mem-item").length > 0) break;
+    await new Promise((r) => setTimeout(r, 50));
+    centerTree = R.renderKeep(Center, {});
+  }
+  assert.ok(
+    byClassAll(centerTree, "wc-nav-item")[3].props.className.includes("wc-on"),
+    "切到记忆后导航项没有高亮",
+  );
+  assert.equal(byClassAll(centerTree, "wc-row").length, 0, "记忆页不该混进开关列表");
+  // 记忆没有「当前类别」的概念，搜索与覆盖筛选在展开态也不该出现。
+  assert.equal(byClassAll(centerTree, "wc-search").length, 0, "记忆页不该出现类别搜索框");
+  const memItems = byClassAll(centerTree, "wc-mem-item");
+  assert.ok(memItems.length >= 3, "记忆列表应有自动记忆、项目与个人来源");
+  assert.match(textOf(memItems[0]), /MEMORY\.md/, "索引文件应排在最前");
+  assert.match(textOf(byClassAll(centerTree, "wc-mem")[0]), /只读/, "记忆页必须标明只读");
+  const noteItem = memItems.find((n) => textOf(n).includes("alpha-note"));
+  assert.ok(noteItem, "记忆列表缺少 alpha-note");
+  noteItem.props.onClick();
+  for (let i = 0; i < 40; i++) {
+    if (byClassAll(centerTree, "wc-mem-md").length > 0) break;
+    await new Promise((r) => setTimeout(r, 50));
+    centerTree = R.renderKeep(Center, {});
+  }
+  const mdBox = byClassAll(centerTree, "wc-mem-md")[0];
+  assert.ok(mdBox, "选中记忆文件后没有渲染正文");
+  const mdText = textOf(mdBox);
+  assert.match(mdText, /正文 加粗 与 code/, "Markdown 正文没有渲染出来");
+  assert.ok(byClassAll(centerTree, "wc-md-h2").length > 0, "Markdown 标题应渲染成 h2");
+  assert.ok(byClassAll(centerTree, "wc-md-table").length > 0, "Markdown 表格应渲染成 table");
+  // strong 没有 className，只能用标签名找。
+  assert.ok(findAll(centerTree, (n) => n && n.type === "strong").length > 0,
+    "行内加粗应渲染成 strong");
+  assert.match(textOf(byClassAll(centerTree, "wc-mem-path")[0] || ""), /alpha-note\.md$/,
+    "正文里要给出可直接复制的完整路径");
+  // 回到配置类别：记忆内容必须整块消失，不能和开关列表叠在一起。
+  byClassAll(centerTree, "wc-nav-item")[0].props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-mem").length, 0, "切回插件类别后记忆区应卸载");
+  assert.ok(byClassAll(centerTree, "wc-row").length > 0, "切回插件类别后列表应恢复");
 
   // 侧栏：页内页签固定在滚动区外，列表再长也不会把它顶走
   const scroller = byClassAll(tree, "wc-scroll")[0];
@@ -506,5 +616,5 @@ fs.writeFileSync(localPath, JSON.stringify({
   console.log("UI_OK panel/center/settings 渲染通过");
 }
 
-console.log("SMOKE_OK checks=111");
+console.log("SMOKE_OK checks=" + checks);
 console.log("main.js", fs.statSync(MAIN).size, "bytes; manifest", MANIFEST.id);
