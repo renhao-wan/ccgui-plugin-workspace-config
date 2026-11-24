@@ -1466,7 +1466,7 @@ const STYLE = `
 .wc-mem-head { display: flex; align-items: center; gap: 10px; }
 .wc-mem-count { font-size: 12px; font-weight: 600; }
 .wc-mem-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .45; }
-.wc-mem-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; align-items: start; }
+.wc-mem-grid { display: grid; grid-template-columns: minmax(0, 292px) minmax(0, 1fr); gap: 24px; align-items: start; }
 .wc-mem-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .wc-mem-item { display: flex; flex-direction: column; gap: 2px; font: inherit; text-align: left; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
 .wc-mem-item:hover { background: rgba(127,127,127,.06); }
@@ -1477,7 +1477,9 @@ const STYLE = `
 .wc-mem-tag { flex: none; padding: 0 6px; border-radius: 999px; font-size: 10.5px; line-height: 16px; background: rgba(127,127,127,.1); opacity: .8; }
 .wc-mem-tag-auto { background: rgba(79,140,255,.16); opacity: 1; }
 .wc-mem-tag-project { background: rgba(46,160,67,.16); opacity: 1; }
-.wc-mem-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+/* 列表和正文是两件事，拉一条细线分开；正文再限制行宽，超宽屏上一行不至于太长。 */
+.wc-mem-detail { min-width: 0; padding-left: 24px; border-left: 1px solid rgba(127,127,127,.12); }
+.wc-mem-body { min-width: 0; max-width: 720px; display: flex; flex-direction: column; gap: 6px; }
 .wc-mem-body-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .wc-mem-body-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wc-mem-body-meta { margin-left: auto; flex: none; font-size: 11px; opacity: .45; }
@@ -1502,7 +1504,10 @@ const STYLE = `
 .wc-md-table th, .wc-md-table td { padding: 4px 8px; border: 1px solid rgba(127,127,127,.2); }
 .wc-md-table th { background: rgba(127,127,127,.07); font-weight: 600; }
 @media (max-width: 880px) {
+  /* 上下堆叠时左分隔线没有任何意义，换成顶部细线。 */
   .wc-mem-grid { grid-template-columns: 1fr; }
+  .wc-mem-detail { padding-left: 0; padding-top: 10px; border-left: 0; border-top: 1px solid rgba(127,127,127,.12); }
+  .wc-mem-body { max-width: none; }
 }
 /* 窄屏：导航翻到顶部做横向滚动条，详情独占一行 */
 @media (max-width: 880px) {
@@ -2692,6 +2697,11 @@ export default function activate(ctx) {
       + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
   }
 
+  // 列表里只留日期：带时分就会在窄列里被省略号吃掉，反而不如不给。
+  function formatDate(ms) {
+    return formatTime(ms).slice(0, 10);
+  }
+
   function formatSize(bytes) {
     const n = Number(bytes) || 0;
     if (n < 1024) return n + " B";
@@ -2730,7 +2740,7 @@ export default function activate(ctx) {
         h("span", { className: "wc-mem-tag wc-mem-tag-" + f.source }, MEM_SOURCE_LABEL[f.source] || f.source)
       ),
       h("span", { className: "wc-mem-meta" },
-        f.rel + " · " + formatSize(f.size) + " · " + formatTime(f.mtime))
+        f.rel + " · " + formatSize(f.size) + " · " + formatDate(f.mtime))
     );
 
     const body = !current
@@ -2741,7 +2751,8 @@ export default function activate(ctx) {
             h("span", { className: "wc-mem-body-title" }, current.title || current.name),
             h("span", { className: "wc-mem-tag wc-mem-tag-" + current.source },
               MEM_SOURCE_LABEL[current.source] || current.source),
-            h("span", { className: "wc-mem-body-meta" }, formatSize(current.size))
+            h("span", { className: "wc-mem-body-meta" },
+              formatSize(current.size) + " · " + formatTime(current.mtime))
           ),
           // 路径要能选中复制：用户经常需要拿它去编辑器里改，插件不提供编辑。
           h("p", { className: "wc-mem-path", title: "只读；修改请用编辑器打开此文件" }, current.path),
