@@ -1128,6 +1128,23 @@ fs.writeFileSync(localPath, JSON.stringify({
   findBtn("展开列表").props.onClick();
   centerTree = R.renderKeep(Center, {});
   assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "再次点击应恢复文件列表");
+  // 另一边也要能收：只留文件列表时正文消失，列表铺满一行。
+  assert.ok(findBtn("收起正文"), "记忆页缺少收起正文的按钮");
+  findBtn("收起正文").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-mem-md").length, 0, "收起正文后正文应消失");
+  assert.ok(byClassAll(centerTree, "wc-mem-grid-listonly").length === 1, "只留列表时应换成单列布局");
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "收起正文后文件列表应还在");
+  // 两边不能同时收：这次要收列表，就顺手把正文顶回来，避免整页空白。
+  findBtn("收起列表").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-mem-list").length, 0, "这次点击应收起文件列表");
+  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "两边同时收起时正文应自动恢复");
+  assert.ok(findBtn("展开列表"), "此时列表按钮应变成展开列表（说明列表仍处于收起状态）");
+  findBtn("展开列表").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "展开列表后列表应回来");
+  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "展开列表后正文仍在");
   // 回到配置类别：记忆内容必须整块消失，不能和开关列表叠在一起。
   byClassAll(centerTree, "wc-nav-item")[0].props.onClick();
   centerTree = R.renderKeep(Center, {});
@@ -1138,6 +1155,28 @@ fs.writeFileSync(localPath, JSON.stringify({
     "离开记忆页后中央外层应恢复普通滚动",
   );
   assert.ok(byClassAll(centerTree, "wc-row").length > 0, "切回插件类别后列表应恢复");
+
+  // 左侧类别导航可折叠：折成窄栏，详情拿回宽度；状态写进 settings 持久化。
+  assert.ok(byClassAll(centerTree, "wc-nav").length === 1, "默认应显示左侧类别导航");
+  const navCollapseBtn = findAll(centerTree, (n) =>
+    n && n.type === "button"
+    && String(n.props.className || "").split(/\s+/).includes("wc-icon-btn")
+    && String(n.props.title || "").includes("类别导航"))[0];
+  assert.ok(navCollapseBtn, "缺少收起类别导航的按钮");
+  navCollapseBtn.props.onClick();
+  await new Promise((r) => setTimeout(r, 30));
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-nav").length, 0, "收起后导航应换成窄栏");
+  assert.equal(byClassAll(centerTree, "wc-nav-rail").length, 1, "收起后应渲染一条窄栏");
+  assert.equal(byClassAll(centerTree, "wc-layout-nav-collapsed").length, 1, "收起后布局要换列宽");
+  assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.navCollapsed, true,
+    "导航收起状态没有持久化");
+  byClassAll(centerTree, "wc-nav-rail")[0].props.onClick();
+  await new Promise((r) => setTimeout(r, 30));
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-nav").length, 1, "点窄栏应展开导航");
+  assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.navCollapsed, false,
+    "展开导航后状态没有写回");
 
   // 侧栏：页内页签固定在滚动区外，列表再长也不会把它顶走
   const scroller = byClassAll(tree, "wc-scroll")[0];
