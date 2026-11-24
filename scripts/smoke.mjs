@@ -1072,6 +1072,21 @@ fs.writeFileSync(localPath, JSON.stringify({
   const memNav = byClassAll(centerTree, "wc-nav-item").find((n) => textOf(n).includes("记忆"));
   assert.ok(memNav, "左侧导航没有记忆项");
   memNav.props.onClick();
+  // 刚进入、还没读完时，界面结构必须和读完以后一致：头部、模式开关都在，
+  // 只是内容区换成「读取中…」。用户反馈过前后两套样子很违和。
+  centerTree = R.renderKeep(Center, {});
+  {
+    const headBeforeLoad = byClassAll(centerTree, "wc-mem-head")[0];
+    assert.ok(headBeforeLoad, "记忆页首次进入就应有头部，不能等读完才出现");
+    assert.equal(byClassAll(centerTree, "wc-mem-modes").length, 1,
+      "首次进入就应有「分栏 / 仅列表 / 仅正文」控件");
+    const modeLabelsBefore = byClassAll(centerTree, "wc-mem-modes")[0].children
+      .map((n) => textOf(n)).join("|");
+    assert.match(modeLabelsBefore, /分栏.*仅列表.*仅正文/,
+      "首次进入的控件应和读完以后是同一套");
+    assert.equal(byClassAll(centerTree, "wc-mem-item").length, 0,
+      "还没读完时不应凭空列出文件");
+  }
   for (let i = 0; i < 40; i++) {
     if (byClassAll(centerTree, "wc-mem-item").length > 0) break;
     await new Promise((r) => setTimeout(r, 50));
@@ -1116,35 +1131,32 @@ fs.writeFileSync(localPath, JSON.stringify({
     "行内加粗应渲染成 strong");
   assert.match(textOf(byClassAll(centerTree, "wc-mem-path")[0] || ""), /alpha-note\.md$/,
     "正文里要给出可直接复制的完整路径");
-  // 正文长的时候列表一直占着近 300px：收起后正文独占一行，再点恢复。
+  // 视图是「分栏 / 仅列表 / 仅正文」三选一，不是一个模式两个来回切的按钮。
   const findBtn = (label) => findAll(centerTree, (n) => n && n.type === "button" && textOf(n) === label)[0];
-  assert.ok(findBtn("收起列表"), "记忆页缺少收起列表的按钮");
-  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "默认应显示文件列表");
-  findBtn("收起列表").props.onClick();
+  assert.ok(findBtn("分栏"), "记忆页缺少「分栏」模式");
+  assert.ok(findBtn("仅列表"), "记忆页缺少「仅列表」模式");
+  assert.ok(findBtn("仅正文"), "记忆页缺少「仅正文」模式");
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "默认分栏应显示文件列表");
+  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "默认分栏应显示正文");
+  assert.match(String(findBtn("分栏").props.className), /wc-on/, "默认高亮的应是分栏");
+
+  findBtn("仅列表").props.onClick();
   centerTree = R.renderKeep(Center, {});
-  assert.equal(byClassAll(centerTree, "wc-mem-list").length, 0, "收起后文件列表应消失");
-  assert.equal(byClassAll(centerTree, "wc-mem-grid-single").length, 1, "收起后正文应独占一列");
-  assert.ok(findBtn("展开列表"), "收起后按钮应变成展开列表");
-  findBtn("展开列表").props.onClick();
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "仅列表模式下文件列表应还在");
+  assert.equal(byClassAll(centerTree, "wc-mem-md").length, 0, "仅列表模式下正文应消失");
+  assert.equal(byClassAll(centerTree, "wc-mem-grid-listonly").length, 1, "仅列表模式应换成单列布局");
+
+  findBtn("仅正文").props.onClick();
   centerTree = R.renderKeep(Center, {});
-  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "再次点击应恢复文件列表");
-  // 另一边也要能收：只留文件列表时正文消失，列表铺满一行。
-  assert.ok(findBtn("收起正文"), "记忆页缺少收起正文的按钮");
-  findBtn("收起正文").props.onClick();
+  assert.equal(byClassAll(centerTree, "wc-mem-list").length, 0, "仅正文模式下文件列表应消失");
+  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "仅正文模式下正文应还在");
+  assert.equal(byClassAll(centerTree, "wc-mem-grid-single").length, 1, "仅正文模式应让正文独占");
+
+  // 再点一次同一个模式回到分栏：三选一控件，不存在「两边都收空」。
+  findBtn("仅正文").props.onClick();
   centerTree = R.renderKeep(Center, {});
-  assert.equal(byClassAll(centerTree, "wc-mem-md").length, 0, "收起正文后正文应消失");
-  assert.ok(byClassAll(centerTree, "wc-mem-grid-listonly").length === 1, "只留列表时应换成单列布局");
-  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "收起正文后文件列表应还在");
-  // 两边不能同时收：这次要收列表，就顺手把正文顶回来，避免整页空白。
-  findBtn("收起列表").props.onClick();
-  centerTree = R.renderKeep(Center, {});
-  assert.equal(byClassAll(centerTree, "wc-mem-list").length, 0, "这次点击应收起文件列表");
-  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "两边同时收起时正文应自动恢复");
-  assert.ok(findBtn("展开列表"), "此时列表按钮应变成展开列表（说明列表仍处于收起状态）");
-  findBtn("展开列表").props.onClick();
-  centerTree = R.renderKeep(Center, {});
-  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "展开列表后列表应回来");
-  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "展开列表后正文仍在");
+  assert.ok(byClassAll(centerTree, "wc-mem-list").length > 0, "再点同一模式应回到分栏（列表）");
+  assert.ok(byClassAll(centerTree, "wc-mem-md").length > 0, "再点同一模式应回到分栏（正文）");
   // 回到配置类别：记忆内容必须整块消失，不能和开关列表叠在一起。
   byClassAll(centerTree, "wc-nav-item")[0].props.onClick();
   centerTree = R.renderKeep(Center, {});
@@ -1171,7 +1183,25 @@ fs.writeFileSync(localPath, JSON.stringify({
   assert.equal(byClassAll(centerTree, "wc-layout-nav-collapsed").length, 1, "收起后布局要换列宽");
   assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.navCollapsed, true,
     "导航收起状态没有持久化");
-  byClassAll(centerTree, "wc-nav-rail")[0].props.onClick();
+  // 窄栏必须仍能切类别：收起后还能点「MCP」直接切过去。
+  const railItems = byClassAll(centerTree, "wc-rail-item");
+  assert.equal(railItems.length, 4, "窄栏应有三个类别加记忆，收起不等于把导航弄丢");
+  const railMcp = railItems.find((n) => textOf(n) === "MCP");
+  assert.ok(railMcp, "窄栏缺少 MCP 类别");
+  railMcp.props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.match(String(railMcp.props.className), /wc-rail-item/);
+  assert.ok(
+    String((byClassAll(centerTree, "wc-rail-item").find((n) => textOf(n) === "MCP") || { props: {} }).props.className || "").includes("wc-on"),
+    "点窄栏的类目标签应切过去并高亮",
+  );
+  assert.equal(byClassAll(centerTree, "wc-mem").length, 0, "从窄栏切到 MCP 后记忆区应卸载");
+  assert.equal(byClassAll(centerTree, "wc-layout-nav-collapsed").length, 1, "切类别不应把导航展开");
+  // 再切回记忆，确认窄栏里的记忆入口也通。
+  byClassAll(centerTree, "wc-rail-item").find((n) => textOf(n) === "记忆").props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.equal(byClassAll(centerTree, "wc-mem").length, 1, "窄栏里的记忆入口应能切回记忆");
+  byClassAll(centerTree, "wc-rail-toggle")[0].props.onClick();
   await new Promise((r) => setTimeout(r, 30));
   centerTree = R.renderKeep(Center, {});
   assert.equal(byClassAll(centerTree, "wc-nav").length, 1, "点窄栏应展开导航");

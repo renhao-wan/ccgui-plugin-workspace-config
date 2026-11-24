@@ -77,11 +77,15 @@ const STYLE = `
 .wc-center .wc-card { padding: 0 14px; }
 .wc-center .wc-stat-num { font-size: 26px; }
 .wc-center-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; }
-/* 导航收起后只留一条 32px 的窄栏，宽度全部让给详情。 */
-.wc-center-layout.wc-layout-nav-collapsed { grid-template-columns: 32px minmax(0, 1fr); gap: 16px; }
-.wc-nav-rail { align-self: start; position: sticky; top: 0; display: flex; align-items: center; justify-content: center; width: 32px; height: 34px; padding: 0; border: 1px solid rgba(127,127,127,.16); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; opacity: .6; }
-.wc-nav-rail:hover { opacity: 1; background: rgba(127,127,127,.07); }
+/* 导航收起后折成一条图标栏：仍能一键切类别，否则收起等于把导航弄丢。 */
+.wc-center-layout.wc-layout-nav-collapsed { grid-template-columns: 46px minmax(0, 1fr); gap: 14px; }
+.wc-nav-rail { position: sticky; top: 0; display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+.wc-rail-toggle { display: flex; align-items: center; justify-content: center; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; opacity: .5; }
+.wc-rail-toggle:hover { opacity: 1; background: rgba(127,127,127,.09); }
 .wc-rail-caret { display: block; width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 5px solid currentColor; }
+.wc-rail-item { font: inherit; font-size: 11px; line-height: 1.2; padding: 8px 0; border: 0; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; opacity: .62; }
+.wc-rail-item:hover { background: rgba(127,127,127,.08); opacity: 1; }
+.wc-rail-item.wc-on { background: rgba(79,140,255,.14); opacity: 1; font-weight: 600; }
 /* 展开态用「向左收」的箭头，和窄栏里的「向右展」配对，不沿用顶部那对上下箭头。 */
 .wc-nav-head .wc-caret-glyph { border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-right: 5px solid currentColor; border-left: 0; }
 .wc-nav-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 4px 4px 12px; }
@@ -101,8 +105,10 @@ const STYLE = `
 .wc-nav-sep { height: 1px; margin: 8px 6px; background: rgba(127,127,127,.16); }
 .wc-mem { display: flex; flex-direction: column; gap: 10px; }
 .wc-mem-head { display: flex; align-items: center; gap: 10px; }
+.wc-mem-modes { margin-left: 4px; }
 .wc-mem-count { font-size: 12px; font-weight: 600; }
 .wc-mem-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .45; }
+.wc-mem-head .wc-seg { flex: none; }
 .wc-mem-grid { display: grid; grid-template-columns: minmax(0, 292px) minmax(0, 1fr); gap: 24px; align-items: start; }
 .wc-mem-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .wc-mem-item { display: flex; flex-direction: column; gap: 2px; font: inherit; text-align: left; padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; }
@@ -1376,29 +1382,26 @@ export default function activate(ctx) {
     return (n / (1024 * 1024)).toFixed(1) + " MB";
   }
 
+  /**
+   * 记忆浏览：只读。
+   *
+   * 视图模式是三选一（分栏 / 仅列表 / 仅正文），不是一个模式两个来回切的按钮：
+   * 来回切的时候按钮文案会变、当前处在什么状态要靠记，很难用。
+   * 首次进入和读完之后的界面结构也保持一致——都是同一条头 + 同一个模式开关，
+   * 不会因为「还没读过」换一套样子。
+   */
   function MemoryView({ s, onPick, onRefresh }) {
     const mem = s.mem;
     const current = s.memFile;
-    // 两栏都能单独收起：正文长时收列表，只想浏览目录时收正文。
-    // 但不能两边都收——那样整页只剩空白。
-    const [listOpen, setListOpen] = useState(true);
-    const [bodyOpen, setBodyOpen] = useState(true);
+    // split 是默认；另外两个模式各自独占整宽。
+    const [view, setView] = useState("split");
+    const mode = (view === "list" || view === "body") ? view : "split";
+    const pickMode = (next) => setView(mode === next ? "split" : next);
 
-    if (!mem) {
-      return h("div", { className: "wc-mem" },
-        s.memError
-          ? h("p", { className: "wc-err" }, s.memError)
-          : h("p", { className: "wc-empty" }, s.memLoading ? "读取记忆文件…" : "还没有读取。"),
-        h("button", {
-          type: "button",
-          className: "wc-refresh",
-          disabled: s.memLoading,
-          onClick: onRefresh,
-        }, s.memLoading ? "读取中…" : "重新读取")
-      );
-    }
-
-    const files = mem.files || [];
+    // 首次进来、还在读：头部与模式开关都照常渲染，只有内容区换成提示。
+    // 这样「读完了」只是内容出现，界面不会整个换一套。
+    const files = mem ? (mem.files || []) : [];
+    const loading = s.memLoading || (!mem && !s.memError);
     const fileItem = (f) => h("button", {
       key: f.path,
       type: "button",
@@ -1416,7 +1419,9 @@ export default function activate(ctx) {
 
     const body = !current
       ? h("p", { className: "wc-empty" },
-          files.length === 0 ? "这个工作区还没有任何记忆文件。" : "从左侧选择一个文件查看内容。")
+          !mem
+            ? (loading ? "读取中…" : "还没有读取。")
+            : (files.length === 0 ? "这个工作区还没有任何记忆文件。" : "从左侧选择一个文件查看内容。"))
       : h("div", { className: "wc-mem-body" },
           h("div", { className: "wc-mem-body-head" },
             h("span", { className: "wc-mem-body-title" }, current.title || current.name),
@@ -1433,37 +1438,29 @@ export default function activate(ctx) {
           h("div", { className: "wc-mem-md wc-md" }, renderMarkdown(h, current.content || "", { prefix: "wc" }))
         );
 
-    // 两边不能同时收起：那样整页只剩一条头，谁也不好看。
-    const toggleList = () => {
-      const next = !listOpen;
-      setListOpen(next);
-      if (!next && !bodyOpen) setBodyOpen(true);
-    };
-    const toggleBody = () => {
-      const next = !bodyOpen;
-      setBodyOpen(next);
-      if (!next && !listOpen) setListOpen(true);
-    };
+    const modeBtn = (key, label, disabled, title) => h("button", {
+      type: "button",
+      className: "wc-btn" + (mode === key ? " wc-on" : ""),
+      disabled: disabled,
+      title: title,
+      "aria-pressed": mode === key ? "true" : "false",
+      onClick: () => pickMode(key),
+    }, label);
+
+    const showList = mode !== "body";
+    const showBody = mode !== "list";
 
     return h("div", { className: "wc-mem" },
       h("div", { className: "wc-mem-head" },
-        h("span", { className: "wc-mem-count" }, files.length + " 个记忆文件 · 只读"),
-        h("span", { className: "wc-mem-dir", title: mem.autoDir }, mem.slug),
-        h("button", {
-          type: "button",
-          className: "wc-refresh",
-          title: listOpen ? "收起文件列表，让正文占满宽度" : "重新显示文件列表",
-          onClick: toggleList,
-        }, listOpen ? "收起列表" : "展开列表"),
-        h("button", {
-          type: "button",
-          className: "wc-refresh",
-          disabled: !current,
-          title: current
-            ? (bodyOpen ? "收起正文，只看文件列表" : "重新显示正文")
-            : "先选一个文件",
-          onClick: toggleBody,
-        }, bodyOpen ? "收起正文" : "展开正文"),
+        h("span", { className: "wc-mem-count" },
+          mem ? files.length + " 个记忆文件 · 只读" : "记忆文件 · 只读"),
+        h("span", { className: "wc-mem-dir", title: mem ? mem.autoDir : undefined },
+          mem ? mem.slug : "读取中…"),
+        h("div", { className: "wc-seg wc-mem-modes", role: "group", "aria-label": "显示方式" },
+          modeBtn("split", "分栏", !mem, "列表和正文各占一半"),
+          modeBtn("list", "仅列表", !mem, "只显示文件列表，正文让出宽度"),
+          modeBtn("body", "仅正文", !mem || !current, "只显示正文，文件列表让出宽度")
+        ),
         h("button", {
           type: "button",
           className: "wc-refresh",
@@ -1474,17 +1471,19 @@ export default function activate(ctx) {
       s.memError ? h("p", { className: "wc-err" }, s.memError) : null,
       h("div", {
         className: "wc-mem-grid"
-          + (listOpen && !bodyOpen ? " wc-mem-grid-listonly" : "")
-          + (!listOpen && bodyOpen ? " wc-mem-grid-single" : ""),
+          + (mode === "list" ? " wc-mem-grid-listonly" : "")
+          + (mode === "body" ? " wc-mem-grid-single" : ""),
       },
-        listOpen
+        showList
           ? h("div", { className: "wc-mem-list" },
-              files.length === 0
-                ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
-                : files.map(fileItem)
+              loading
+                ? h("p", { className: "wc-empty" }, "读取记忆文件…")
+                : files.length === 0
+                  ? h("p", { className: "wc-empty" }, "没有找到记忆文件")
+                  : files.map(fileItem)
             )
           : null,
-        bodyOpen
+        showBody
           ? h("div", { className: "wc-mem-detail" },
               s.memFileLoading ? h("p", { className: "wc-empty" }, "读取中…") : body
             )
@@ -1603,9 +1602,9 @@ export default function activate(ctx) {
     }
     const data = s.data;
     const groups = [
-      { key: "plugin", title: "插件", rows: data.plugins || [], empty: "没有可管理的插件", fold: false },
-      { key: "mcp", title: "MCP", rows: data.mcp || [], empty: "没有继承到 MCP 服务器", fold: false },
-      { key: "skill", title: "技能", rows: data.skills || [], empty: "没有发现技能", fold: true },
+      { key: "plugin", title: "插件", rail: "插件", rows: data.plugins || [], empty: "没有可管理的插件", fold: false },
+      { key: "mcp", title: "MCP", rail: "MCP", rows: data.mcp || [], empty: "没有继承到 MCP 服务器", fold: false },
+      { key: "skill", title: "技能", rail: "技能", rows: data.skills || [], empty: "没有发现技能", fold: true },
     ];
     const tip = h("p", { className: "wc-tip" },
       "只写项目级 .claude/settings.local.json；全局配置不受影响。");
@@ -1687,19 +1686,38 @@ export default function activate(ctx) {
         )
       );
       // 左侧导航 + 右侧详情：导航常驻，右侧只渲染当前类别。
-      // 导航可以折成一条窄栏，把宽度让给详情（宽表、长命令时有用）。
+      // 导航可以折成图标栏，把宽度让给详情；但折叠后仍要能切类别，
+      // 否则收起就等于把导航弄丢了（用户反馈过）。
       const navCollapsed = Boolean(s.navCollapsed);
+      const railItem = (key, label, isOn, onClick) => h("button", {
+        key: key,
+        type: "button",
+        className: "wc-rail-item" + (isOn ? " wc-on" : ""),
+        title: label,
+        "aria-current": isOn ? "true" : undefined,
+        onClick: onClick,
+      }, label);
       return h("div", { className: "wc-body" },
         h("div", { className: "wc-center-layout" + (navCollapsed ? " wc-layout-nav-collapsed" : "") },
           navCollapsed
-            ? h("button", {
-                type: "button",
-                className: "wc-nav-rail",
-                title: "展开类别导航",
-                "aria-label": "展开类别导航",
-                "aria-expanded": "false",
-                onClick: () => { void saveSettings({ navCollapsed: false }); },
-              }, h("span", { className: "wc-rail-caret" }))
+            ? h("div", { className: "wc-nav-rail", role: "navigation", "aria-label": "配置类别" },
+                h("button", {
+                  type: "button",
+                  className: "wc-rail-toggle",
+                  title: "展开类别导航",
+                  "aria-label": "展开类别导航",
+                  "aria-expanded": "false",
+                  onClick: () => { void saveSettings({ navCollapsed: false }); },
+                }, h("span", { className: "wc-rail-caret" })),
+                groups.map((g) => railItem(g.key, g.rail, active === g.key && !memActive, () => {
+                  set({ activeKind: g.key, query: "" });
+                })),
+                h("div", { className: "wc-nav-sep", "aria-hidden": "true" }),
+                railItem("memory", "记忆", memActive, () => {
+                  set({ activeKind: "memory", query: "" });
+                  if (!s.mem && !s.memLoading) void loadMemory();
+                })
+              )
             : h("nav", { className: "wc-nav", "aria-label": "配置类别" },
                 h("div", { className: "wc-nav-head" },
                   h("span", { className: "wc-nav-head-title" }, "类别"),
