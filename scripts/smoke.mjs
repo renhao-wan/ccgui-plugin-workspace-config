@@ -659,6 +659,8 @@ fs.writeFileSync(localPath, JSON.stringify({
 
   const registered = {};
   const disposers = [];
+  // 宿主当前会话的工作区。初始为空表示「宿主还没准备好」，插件不该据此清空视图。
+  const host = { path: "" };
   const ctx = {
     react: R.api,
     pluginId: MANIFEST.id,
@@ -686,6 +688,8 @@ fs.writeFileSync(localPath, JSON.stringify({
       },
     },
     workspaces: { async list() { return [{ id: "w1", kind: "workspace", path: ws }]; } },
+    // 宿主的工作区元数据：CC GUI 用它表示「当前会话所在目录」。
+    workspace: { async getMetadata() { return host.path ? { path: host.path } : null; } },
     ui: {
       registerPanelTab(def) { registered.panel = def; return () => {}; },
       registerCenterTab(def) { registered.center = def; return () => {}; },
@@ -1082,6 +1086,29 @@ fs.writeFileSync(localPath, JSON.stringify({
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.showDesc, true, "设置没有写入 storage");
   assert.match(textOf(settingsTree), /反馈/, "设置页没有渲染出反馈区");
+
+  // 宿主换工作区（切会话标签）：中央视图没有 workspacePath prop，
+  // 只能靠轮询 ctx.workspace.getMetadata() 跟上。
+  const ws2 = path.join(tmp, "workspace-2");
+  fs.mkdirSync(path.join(ws2, ".claude"), { recursive: true });
+  fs.writeFileSync(
+    path.join(ws2, ".claude", "settings.local.json"),
+    JSON.stringify({ enabledPlugins: { "beta@market": false } }, null, 2),
+  );
+  // 先确保统计区展开：折叠态不显示工作区路径，断言会一直等不到。
+  const headBefore = byClassAll(centerTree, "wc-page-head")[0];
+  if (headBefore && String(headBefore.props.className || "").includes("wc-head-collapsed")) {
+    byClassAll(centerTree, "wc-icon-btn")[0].props.onClick();
+    centerTree = R.renderKeep(Center, {});
+  }
+  host.path = ws2;
+  let switchedWs = false;
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    centerTree = R.renderKeep(Center, {});
+    if (textOf(centerTree).includes("workspace-2")) { switchedWs = true; break; }
+  }
+  assert.ok(switchedWs, "宿主换工作区后中央视图没有跟上（轮询没生效）");
 
   dispose();
   console.log("UI_OK panel/center/settings 渲染通过");

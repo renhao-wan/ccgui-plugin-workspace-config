@@ -18,6 +18,9 @@ const SCRIPT_REL = "runtime/config-io.mjs";
 const SETTINGS_KEY = "workspace-config.settings.v1";
 const IO_TIMEOUT_MS = 20000;
 const SCAN_TIMEOUT_MS = 30000;
+// 宿主切换会话时只会更新它自己的工作区，插件拿不到事件，只能轮询。
+// 切过去要「马上就对了」，所以间隔不能太长；页面隐藏时整轮跳过，不空转。
+const HOST_WORKSPACE_POLL_MS = 2500;
 // 自检会真的握手一个 server，比读写配置慢得多；留够余量免得进程还没起完就被掐。
 const PROBE_TIMEOUT_MS = 70000;
 
@@ -276,7 +279,7 @@ const STYLE = `
 export default function activate(ctx) {
   const { createElement: h, useEffect, useState, useRef } = ctx.react;
 
-  const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "", probes: {} };
+  const store = { ws: "", manual: false, data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false, headCollapsed: true, mem: null, memFile: null, memLoading: false, memFileLoading: false, memError: "", probes: {} };
   const subs = new Set();
 
   // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
@@ -408,6 +411,49 @@ export default function activate(ctx) {
     } catch (err) {
       if (seq !== scanSeq) return;
       set({ loading: false, data: null, error: String((err && err.message) || err) });
+    }
+  }
+
+  /**
+   * 宿主当前会话的工作区。
+   * CC GUI 的工作区是「当前会话所在目录」：切会话标签就等于换工作区，
+   * 同一工作区下的多个会话共用同一个目录。拿不到时返回空串。
+   */
+  async function hostWorkspace() {
+    try {
+      if (!ctx.workspace || typeof ctx.workspace.getMetadata !== "function") return "";
+      const meta = await ctx.workspace.getMetadata();
+      return meta && typeof meta.path === "string" ? meta.path.trim() : "";
+    } catch {
+      return "";
+    }
+  }
+
+  // 宿主不会主动通知工作区变化，只能轮询比对。记下上一次看到的宿主工作区，
+  // 只有它真的换了才跟着切换——否则用户手动选的工作区会被每轮轮询拉回去。
+  let lastHostWs = "";
+  let hostSyncBusy = false;
+
+  async function syncHostWorkspace() {
+    if (hostSyncBusy) return;
+    hostSyncBusy = true;
+    try {
+      const ws = await hostWorkspace();
+      // 空值可能只是宿主还没准备好，不能据此清空当前视图。
+      if (!ws || ws === lastHostWs) return;
+      lastHostWs = ws;
+      // 宿主换了工作区，说明用户在切会话，手动选择到此为止。
+      if (ws === store.ws) {
+        if (store.manual) set({ manual: false });
+        return;
+      }
+      set({
+        ws, manual: false, data: null, error: "", note: "",
+        mem: null, memFile: null, probes: {},
+      });
+      await refresh(ws);
+    } finally {
+      hostSyncBusy = false;
     }
   }
 
@@ -1547,10 +1593,19 @@ export default function activate(ctx) {
     useAutoClearNote(s.note);
     const scrollRef = useRef(null);
     useEffect(() => {
-      const ws = workspacePath || "";
+      const fromProps = workspacePath || "";
+      if (!fromProps) {
+        // 宿主没通过 prop 传工作区时主动问一次；此时保留已有结果，不清空。
+        void syncHostWorkspace();
+        return;
+      }
+      if (fromProps === store.ws) {
+        if (store.manual) set({ manual: false });
+        return;
+      }
       // 换工作区时记忆列表必须一起作废，否则会显示上一个工作区的文件。
-      set({ ws, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
-      if (ws) void refresh(ws);
+      set({ ws: fromProps, manual: false, data: null, error: "", note: "", mem: null, memFile: null, memError: "", probes: {} });
+      void refresh(fromProps);
     }, [workspacePath]);
     // 切页内页签时回到顶部：换了类别还停在上一类的滚动位置，
     // 看上去就像「点了没反应」。
@@ -1583,6 +1638,8 @@ export default function activate(ctx) {
     const [pickError, setPickError] = useState("");
 
     useEffect(() => {
+      // 宿主可能已经给了工作区，但插件刚打开时还没同步过，先问一次。
+      if (!s.ws) void syncHostWorkspace();
       if (s.ws) return;
       let alive = true;
       (async () => {
@@ -1614,7 +1671,8 @@ export default function activate(ctx) {
                     className: "wc-pick",
                     onClick: () => {
                       if (!row.path) return;
-                      set({ ws: row.path, data: null, error: "", note: "", mem: null, memFile: null, memError: "" });
+                      // 手动选的工作区在宿主换会话之前一直保留，否则轮询会把它拉回去。
+                      set({ ws: row.path, manual: true, data: null, error: "", note: "", mem: null, memFile: null, memError: "", probes: {} });
                       void refresh(row.path);
                     },
                   },
@@ -1649,6 +1707,22 @@ export default function activate(ctx) {
   }
 
   ctx.theme.injectCss(STYLE);
+
+  // 插件打开时先同步一次，别让用户先看到空列表再等下一个轮询。
+  void syncHostWorkspace();
+  const hostTimer = setInterval(() => {
+    // 后台窗口没必要轮询：这时用户不在看，切回来时 visibilitychange 会补一次。
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    void syncHostWorkspace();
+  }, HOST_WORKSPACE_POLL_MS);
+  const visibilityHandler = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      void syncHostWorkspace();
+    }
+  };
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", visibilityHandler);
+  }
 
   const disposers = [
     ctx.ui.registerPanelTab({
@@ -1687,6 +1761,10 @@ export default function activate(ctx) {
   ];
 
   return () => {
+    clearInterval(hostTimer);
+    if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+      document.removeEventListener("visibilitychange", visibilityHandler);
+    }
     for (const dispose of disposers) {
       try { dispose(); } catch { /* 宿主可能已回收 */ }
     }
