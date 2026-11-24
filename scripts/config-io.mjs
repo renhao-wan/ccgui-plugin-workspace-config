@@ -317,6 +317,55 @@ function scan(ws) {
     }
   }
 
+  /* ---------------- diagnostics ---------------- */
+
+  // 面板只列「当前存在的资源」，所以 local 里指向已消失资源的键会完全没有入口。
+  // 这里把它们找出来：stale 项可以一键清掉，其余只提示原因。
+  const diagnostics = [];
+  const seenDiag = new Set();
+  // 同名技能可能被多个来源列出（个人版与项目版、或多个插件共用 installPath），
+  // 诊断只该报一次。
+  const diag = (level, kind, id, name, message, fixable) => {
+    const key = level + ":" + kind + ":" + id;
+    if (seenDiag.has(key)) return;
+    seenDiag.add(key);
+    diagnostics.push({ level, kind, id, name, message, fixable: Boolean(fixable) });
+  };
+
+  const knownPlugins = new Set(plugins.map((p) => p.id));
+  for (const id of Object.keys(local.enabledPlugins || {})) {
+    if (!knownPlugins.has(id)) diag("stale", "plugin", id, id, "插件已不存在，本地仍保留开关", true);
+  }
+  for (const p of plugins) {
+    if (!p.installed && p.globalState === "on") {
+      diag("warn", "plugin", p.id, p.name, "全局启用但本机未安装", false);
+    }
+  }
+
+  const knownSkills = new Set(skillRows.map((r) => r.name));
+  for (const name of Object.keys(local.skillOverrides || {})) {
+    if (!knownSkills.has(name)) diag("stale", "skill", name, name, "技能已不存在，本地仍保留开关", true);
+  }
+  for (const r of skillRows) {
+    const localTouched = Object.prototype.hasOwnProperty.call(local.skillOverrides || {}, r.name);
+    if (r.shadowed) diag("info", "skill", r.id, r.name, "项目版本被同名个人技能遮蔽", false);
+    if (r.controllable === false && localTouched) {
+      diag("warn", "skill", r.id, r.name, "插件提供的技能不受本地开关控制", false);
+    }
+  }
+
+  const knownMcp = new Set(mcpNames);
+  for (const entry of Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []) {
+    if (entry && entry.serverName && !knownMcp.has(entry.serverName)) {
+      diag("stale", "mcp", entry.serverName, entry.serverName, "MCP 已不存在，本地仍保留禁用", true);
+    }
+  }
+  for (const row of mcp) {
+    if (row.sharedState === "off") {
+      diag("warn", "mcp", row.id, row.name, "团队配置已禁用，本地无法解除", false);
+    }
+  }
+
   return {
     ok: true,
     workspace: ws,
@@ -325,6 +374,7 @@ function scan(ws) {
     plugins,
     mcp,
     skills: skillRows,
+    diagnostics,
   };
 }
 

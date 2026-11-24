@@ -19,6 +19,12 @@ const SETTINGS_KEY = "workspace-config.settings.v1";
 const IO_TIMEOUT_MS = 20000;
 const SCAN_TIMEOUT_MS = 30000;
 
+// 反馈渠道。endpoint 必须与 manifest 的 network:<host> 逐字一致。
+const FEEDBACK_ENDPOINT = "https://ccgui-feedback.2653990378.workers.dev";
+const FEEDBACK_REPO = "renhao-wan/ccgui-plugin-workspace-config";
+const FEEDBACK_PLUGIN_NAME = "工作区配置";
+const FEEDBACK_TIMEOUT_MS = 15000;
+
 /*__LIB_SOURCE__*/
 
 /*__SCAN_SOURCE__*/
@@ -113,6 +119,59 @@ const STYLE = `
 .wc-bulk-btn.wc-danger { border-color: rgba(217,83,79,.5); color: #c92a2a; }
 .wc-bulk-confirm { padding: 8px 11px; border: 1px solid rgba(217,83,79,.35); border-radius: 9px; background: rgba(217,83,79,.06); }
 .wc-bulk-text { flex: 1; min-width: 0; font-size: 12px; }
+
+/* ---------- 诊断 ---------- */
+.wc-diag { margin: 0 0 18px; padding: 12px 14px; border: 1px solid rgba(217,83,79,.28); border-radius: 10px; background: rgba(217,83,79,.05); }
+.wc-diag-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.wc-diag-title { font-size: 12px; font-weight: 600; }
+.wc-diag-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.wc-diag-item { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.wc-diag-name { flex: none; font-weight: 500; }
+.wc-diag-msg { opacity: .65; }
+.wc-diag-info { opacity: .75; }
+.wc-diag-stale .wc-diag-msg { color: #c92a2a; opacity: .85; }
+.wc-diag-mini { width: 100%; box-sizing: border-box; text-align: left; font: inherit; font-size: 11.5px; margin: 0 0 10px; padding: 7px 10px; border: 1px solid rgba(217,83,79,.28); border-radius: 8px; background: rgba(217,83,79,.05); color: inherit; cursor: pointer; }
+.wc-diag-mini:hover { background: rgba(217,83,79,.09); }
+
+/* ---------- 生效链路 ---------- */
+.wc-item { border-bottom: 1px solid rgba(127,127,127,.12); }
+.wc-item:last-child { border-bottom: 0; }
+.wc-item > .wc-row { border-bottom: 0; }
+.wc-main-click { cursor: pointer; }
+.wc-main-click:hover { opacity: .85; }
+.wc-caret { float: right; margin-left: 8px; font-size: 10px; opacity: .45; }
+.wc-flow { padding: 0 0 12px; }
+.wc-flow-chain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wc-flow-step { display: inline-flex; flex-direction: column; gap: 1px; padding: 6px 10px; border: 1px solid rgba(127,127,127,.18); border-radius: 8px; background: rgba(127,127,127,.04); }
+.wc-flow-label { font-size: 10px; opacity: .55; }
+.wc-flow-value { font-size: 12px; font-weight: 500; }
+.wc-flow-strong { border-color: rgba(79,140,255,.4); background: rgba(79,140,255,.1); }
+.wc-flow-arrow { font-size: 11px; opacity: .4; }
+.wc-flow-note { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; opacity: .62; }
+
+/* ---------- 反馈（共用 feedback-ui 的结构，这里只管外观） ---------- */
+.wc-section { margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(127,127,127,.16); }
+.wc-section-label h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.wc-section-label p { margin: 0 0 10px; font-size: 12px; opacity: .6; }
+.wc-feedback-text { width: 100%; min-height: 92px; resize: vertical; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.6; padding: 8px 11px; border: 1px solid rgba(127,127,127,.22); border-radius: 9px; background: rgba(127,127,127,.04); color: inherit; }
+.wc-feedback-text:focus { outline: none; border-color: rgba(79,140,255,.5); }
+.wc-feedback-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 6px; font-size: 11.5px; opacity: .6; }
+.wc-feedback-count { font-variant-numeric: tabular-nums; }
+.wc-feedback-quota { text-align: right; }
+.wc-feedback-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.wc-feedback-issue { display: inline-flex; align-items: center; height: 32px; box-sizing: border-box; padding: 0 13px; border: 1px solid rgba(127,127,127,.22); border-radius: 8px; background: transparent; color: inherit; font-size: 12px; line-height: 1; text-decoration: none; }
+.wc-feedback-issue:hover { background: rgba(127,127,127,.06); }
+.wc-feedback-send { font: inherit; font-size: 12px; height: 32px; padding: 0 14px; border: 1px solid rgba(79,140,255,.45); border-radius: 8px; background: rgba(79,140,255,.14); color: inherit; cursor: pointer; }
+.wc-feedback-send:hover:not(:disabled) { background: rgba(79,140,255,.22); }
+.wc-feedback-send:disabled { opacity: .45; cursor: default; }
+.wc-feedback-sent { border-color: rgba(55,178,77,.55); background: transparent; color: #37b24d; opacity: 1; cursor: default; }
+.wc-feedback-status { margin: 10px 0 0; font-size: 12px; }
+.wc-feedback-status.is-ok { color: #37b24d; font-weight: 500; }
+.wc-feedback-status.is-bad { color: #e03131; }
+.wc-fb-hint { font-size: 11.5px; opacity: .55; }
+.wc-fb-muted { opacity: .5; }
+.wc-fb-link { margin-left: 6px; padding: 0; border: 0; background: none; font: inherit; font-size: 11.5px; color: #4c8dff; text-decoration: underline; cursor: pointer; }
+.wc-fb-link:disabled { opacity: .5; cursor: not-allowed; }
 `;
 
 export default function activate(ctx) {
@@ -120,6 +179,28 @@ export default function activate(ctx) {
 
   const store = { ws: "", data: null, loading: false, error: "", note: "", busy: "", activeKind: "plugin", query: "", onlyOverridden: false, settings: {}, showDesc: false };
   const subs = new Set();
+
+  // 反馈网络层来自共用库：endpoint 与 pluginId 都只从常量来，
+  // 请求体里的 pluginId 与 User-Agent 不可能错位。
+  let feedbackNet = null;
+  function getFeedbackNet() {
+    if (!feedbackNet) {
+      feedbackNet = createFeedbackNet(ctx, {
+        endpoint: FEEDBACK_ENDPOINT,
+        pluginId: PLUGIN_ID,
+        timeoutMs: FEEDBACK_TIMEOUT_MS,
+      });
+    }
+    return feedbackNet;
+  }
+
+  function hostAppVersion() {
+    try {
+      return ctx && ctx.host && typeof ctx.host.appVersion === "string" ? ctx.host.appVersion : "";
+    } catch {
+      return "";
+    }
+  }
 
   function set(patch) {
     Object.assign(store, patch);
@@ -396,31 +477,105 @@ export default function activate(ctx) {
     return "生效：未知";
   }
 
+  /* ------------------------------------------------------------ 生效链路 */
+
+  const LAYER_WORD = {
+    team: { inherit: "未设置", on: "启用", off: "禁用" },
+    local: { inherit: "跟随", on: "启用", off: "禁用" },
+    effective: { on: "开", off: "关", unknown: "未知" },
+  };
+
+  function flowSteps(row) {
+    const globalWord = row.kind === "mcp"
+      ? (row.globalState === "off" ? "禁用" : "可用")
+      : (row.globalState === "on" ? "启用" : row.globalState === "off" ? "禁用" : "未记录");
+    return [
+      { label: "全局", value: globalWord },
+      { label: "团队配置", value: LAYER_WORD.team[row.sharedState || "inherit"] },
+      { label: "本地", value: LAYER_WORD.local[row.localState || "inherit"] },
+      { label: "最终", value: LAYER_WORD.effective[row.effectiveState] || "未知", strong: true },
+    ];
+  }
+
+  function flowNote(row) {
+    if (row.kind === "mcp" && row.sharedState === "off") {
+      return "团队配置里禁用了它。MCP 的禁用名单跨层合并，本地无法解除；要恢复请修改仓库的 .claude/settings.json。";
+    }
+    if ((row.localState || "inherit") !== "inherit") {
+      return row.kind === "mcp"
+        ? "本地写入的禁用优先于全局。"
+        : "本地覆盖优先于团队配置与全局。";
+    }
+    if ((row.sharedState || "inherit") !== "inherit") {
+      return "本地没有覆盖，沿用团队配置的值。";
+    }
+    return "本地与团队配置都未设置，沿用全局。";
+  }
+
+  function Flow({ row }) {
+    const chain = [];
+    flowSteps(row).forEach((step, i) => {
+      if (i > 0) chain.push(h("span", { key: "a" + i, className: "wc-flow-arrow" }, "→"));
+      chain.push(h("span", {
+        key: "s" + i,
+        className: "wc-flow-step" + (step.strong ? " wc-flow-strong" : ""),
+      },
+        h("span", { className: "wc-flow-label" }, step.label),
+        h("span", { className: "wc-flow-value" }, step.value)
+      ));
+    });
+    return h("div", { className: "wc-flow" },
+      h("div", { className: "wc-flow-chain" }, chain),
+      h("p", { className: "wc-flow-note" }, flowNote(row))
+    );
+  }
+
   function Row({ row, compact, showDesc }) {
     const v = view(row);
+    const [open, setOpen] = useState(false);
     const locked = row.kind === "skill" && row.controllable === false;
-    return h("div", { className: "wc-row" },
-      h("div", { className: "wc-main" },
-        h("div", { className: "wc-name" },
-          h("span", {
-            className: "wc-dot " + (row.effectiveState === "on" ? "on" : "off"),
-            title: effectiveLabel(row),
-            "aria-label": effectiveLabel(row),
-          }),
-          row.name
+    // 侧栏要简洁：链路展开只在中央视图提供。
+    const expandable = !compact;
+    return h("div", { className: "wc-item" },
+      h("div", { className: "wc-row" },
+        h("div", {
+          className: "wc-main" + (expandable ? " wc-main-click" : ""),
+          onClick: expandable ? () => setOpen((x) => !x) : undefined,
+          role: expandable ? "button" : undefined,
+          tabIndex: expandable ? 0 : undefined,
+          "aria-expanded": expandable ? open : undefined,
+          onKeyDown: expandable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setOpen((x) => !x);
+                }
+              }
+            : undefined,
+        },
+          h("div", { className: "wc-name" },
+            h("span", {
+              className: "wc-dot " + (row.effectiveState === "on" ? "on" : "off"),
+              title: effectiveLabel(row),
+              "aria-label": effectiveLabel(row),
+            }),
+            row.name,
+            expandable ? h("span", { className: "wc-caret" }, open ? "▾" : "▸") : null
+          ),
+          h("div", { className: "wc-meta" }, metaOf(row, compact)),
+          showDesc && row.description
+            ? h("div", { className: "wc-desc", title: row.description }, row.description)
+            : null
         ),
-        h("div", { className: "wc-meta" }, metaOf(row, compact)),
-        showDesc && row.description
-          ? h("div", { className: "wc-desc", title: row.description }, row.description)
-          : null
+        locked
+          ? h("span", {
+              className: "wc-badge",
+              title: "这个技能随插件加载，不能单独关闭；要禁用它，请在「插件」里关闭 "
+                + (row.plugin || "所属插件"),
+            }, "随插件")
+          : h(Seg, { row: v, compact })
       ),
-      locked
-        ? h("span", {
-            className: "wc-badge",
-            title: "这个技能随插件加载，不能单独关闭；要禁用它，请在「插件」里关闭 "
-              + (row.plugin || "所属插件"),
-          }, "随插件")
-        : h(Seg, { row: v, compact })
+      open && expandable ? h(Flow, { row }) : null
     );
   }
 
@@ -479,6 +634,50 @@ export default function activate(ctx) {
         className: "wc-bulk-btn",
         onClick: () => setConfirming(""),
       }, "取消")
+    );
+  }
+
+  /* ------------------------------------------------------------ 诊断 */
+
+  // 残留键在列表里根本不会出现（scan 只列现存资源），所以清理入口必须放在诊断区。
+  function Diagnostics({ data }) {
+    const [confirming, setConfirming] = useState(false);
+    const list = data.diagnostics || [];
+    if (list.length === 0) return null;
+    const fixable = list.filter((d) => d.fixable);
+    const clean = () => {
+      setConfirming(false);
+      void applyMany(
+        fixable.map((d) => ({ kind: d.kind, id: d.id, state: "inherit" })),
+        "已清理残留",
+      );
+    };
+    return h("div", { className: "wc-diag" },
+      h("div", { className: "wc-diag-head" },
+        h("span", { className: "wc-diag-title" },
+          "诊断 · " + list.length + (fixable.length ? "（" + fixable.length + " 项可清理）" : "")),
+        fixable.length === 0
+          ? null
+          : confirming
+            ? h("span", { style: { display: "flex", gap: 8 } },
+                h("button", { type: "button", className: "wc-bulk-btn wc-danger", onClick: clean }, "确认清理"),
+                h("button", { type: "button", className: "wc-bulk-btn", onClick: () => setConfirming(false) }, "取消"))
+            : h("button", { type: "button", className: "wc-bulk-btn", onClick: () => setConfirming(true) },
+                "清理残留（" + fixable.length + "）")
+      ),
+      h("ul", { className: "wc-diag-list" },
+        list.slice(0, 8).map((d, i) => h("li", {
+          key: i + ":" + d.kind + ":" + d.id,
+          className: "wc-diag-item wc-diag-" + d.level,
+        },
+          h("span", { className: "wc-diag-name" }, d.name),
+          h("span", { className: "wc-diag-msg" }, d.message)
+        )),
+        list.length > 8
+          ? h("li", { className: "wc-diag-item wc-diag-info" },
+              h("span", { className: "wc-diag-msg" }, "还有 " + (list.length - 8) + " 条…"))
+          : null
+      )
     );
   }
 
@@ -547,6 +746,33 @@ export default function activate(ctx) {
     );
   }
 
+  // 状态与提交逻辑在共用库 feedback-ui（四插件同一套），这里只把它接到
+  // 本插件的网络层与 wc-* 样式上。
+  function FeedbackSection() {
+    const form = useFeedbackForm(ctx.react, {
+      repo: FEEDBACK_REPO,
+      pluginName: FEEDBACK_PLUGIN_NAME,
+      pluginVersion: ctx.version,
+      hostVersion: hostAppVersion(),
+      send: (text) => getFeedbackNet().send(text),
+      quota: () => getFeedbackNet().quota(),
+    });
+    return form.render(h, {
+      prefix: "wc",
+      variant: "section",
+      rows: 5,
+      classes: {
+        input: "wc-feedback-text",
+        primaryBtn: "wc-feedback-send",
+        secondaryBtn: "wc-feedback-issue",
+        hint: "wc-fb-hint",
+        note: "wc-feedback-status",
+        linkBtn: "wc-fb-link",
+        muted: "wc-fb-muted",
+      },
+    });
+  }
+
   function SettingsSection() {
     const s = useStore();
     return h("div", { className: "wc-settings" },
@@ -559,7 +785,8 @@ export default function activate(ctx) {
         "在列表中显示描述"
       ),
       h("p", { className: "wc-settings-note" },
-        "描述只在中央「工作区配置」里显示，右侧面板始终简洁。")
+        "描述只在中央「工作区配置」里显示，右侧面板始终简洁。"),
+      h(FeedbackSection, null)
     );
   }
 
@@ -573,6 +800,7 @@ export default function activate(ctx) {
       h("p", { className: "wc-page-sub", title: data.workspace },
         "工作区：" + data.workspace + " · 只影响当前工作区，全局配置由 CC Switch 管理。"),
       h(Stats, { data }),
+      h(Diagnostics, { data }),
       h("div", { className: "wc-center-layout" },
         h("nav", { className: "wc-nav" },
           groups.map((g) => {
@@ -705,6 +933,13 @@ export default function activate(ctx) {
     return h("div", { className: "wc-root wc-compact" },
       h(Head, { s, onRefresh: () => refresh(workspacePath || s.ws) }),
       h("div", { className: "wc-scroll" },
+        s.data && (s.data.diagnostics || []).length > 0
+          ? h("button", {
+              type: "button",
+              className: "wc-diag-mini",
+              onClick: () => { ctx.ui.openCenterTab(TAB_KEY); },
+            }, "诊断 " + s.data.diagnostics.length + " 项 · 打开中央面板清理")
+          : null,
         h(Body, { mode: "panel" })
       ),
       h(Toast, { note: s.note, error: s.error })

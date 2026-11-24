@@ -224,6 +224,31 @@ const backToTeam = byId(run(["scan", ws]).plugins);
 assert.equal(backToTeam["alpha@market"].localState, "inherit");
 assert.equal(backToTeam["alpha@market"].effectiveState, "off");
 
+/* ------------------------------------------------------------ 诊断 */
+
+// local 里指向已消失资源的键：列表只列现存资源，所以它们只能靠诊断区发现。
+fs.writeFileSync(localPath, JSON.stringify({
+  enabledPlugins: { "ghost@market": false },
+  skillOverrides: { "ghost-skill": "off" },
+  deniedMcpServers: [{ serverName: "ghost-mcp" }],
+}, null, 2));
+
+const diagScan = run(["scan", ws]);
+const stale = diagScan.diagnostics.filter((d) => d.level === "stale");
+assert.equal(stale.length, 3, "三条残留都要被识别");
+assert.ok(stale.every((d) => d.fixable), "残留项必须可清理");
+assert.equal(diagScan.plugins.some((x) => x.id === "ghost@market"), false, "残留插件不该出现在列表");
+assert.equal(diagScan.skills.some((x) => x.name === "ghost-skill"), false, "残留技能不该出现在列表");
+assert.equal(diagScan.mcp.some((x) => x.id === "ghost-mcp"), false, "残留 MCP 不该出现在列表");
+
+// 清理走的是界面「清理残留」同一个入口：setMany + inherit
+run(["setMany", ws, JSON.stringify(
+  diagScan.diagnostics.filter((d) => d.fixable).map((d) => ({ kind: d.kind, id: d.id, state: "inherit" })),
+)]);
+const afterClean = JSON.parse(fs.readFileSync(localPath, "utf8"));
+assert.deepEqual(afterClean, {}, "清理后不应留下空键");
+assert.equal(run(["scan", ws]).diagnostics.filter((d) => d.level === "stale").length, 0);
+
 /* ------------------------------------------------------------ UI 渲染 */
 
 // 真实渲染面板与中央页签：未定义变量、组件调用写错这类问题只有渲染时才暴露。
@@ -257,7 +282,11 @@ assert.equal(backToTeam["alpha@market"].effectiveState, "off");
       async getLocation() { return { kind: "data", path: path.dirname(script) }; },
     },
     bridge: {
-      async invoke(_cmd, args) {
+      async invoke(cmd, args) {
+        // 反馈区挂载时会查一次额度；冒烟不联网，给一个固定额度。
+        if (cmd === "plugin_http_request") {
+          return { status: 200, body: JSON.stringify({ remaining: 1, dailyLimit: 1, fallbackRemaining: 2 }) };
+        }
         const out = execFileSync(process.execPath, [script, ...args.args.slice(1)], { env, encoding: "utf8" });
         return { code: 0, stdout: out, stderr: "" };
       },
@@ -301,6 +330,7 @@ assert.equal(backToTeam["alpha@market"].effectiveState, "off");
   assert.match(panelText, /团队禁用/, "团队层禁用没有在面板上标出");
   assert.match(panelText, /跟随团队/, "团队层有值时「跟随」按钮文案应变成跟随团队");
   assert.ok(!/跟随全局/.test(panelText), "团队层有值时仍显示「跟随全局」会误导");
+  assert.match(panelText, /诊断/, "右侧面板没有提示诊断入口");
 
   // 中央页签：先在面板里拿到工作区，再渲染大屏。
   const Center = registered.center.component;
@@ -319,8 +349,17 @@ assert.equal(backToTeam["alpha@market"].effectiveState, "off");
   const centerText = textOf(centerTree);
   assert.ok(byClassAll(centerTree, "wc-nav-item").length === 3, "中央页签没有渲染出三个类别导航");
   assert.ok(!centerText.includes("undefined"), "中央页签文案里出现了 undefined");
+  // 团队层禁用了 proj-one，诊断区应当出现
+  assert.match(centerText, /诊断/, "中央页签没有渲染出诊断区");
+  // 点行展开生效链路：全局 → 团队配置 → 本地 → 最终
+  const mains = byClassAll(centerTree, "wc-main");
+  assert.ok(mains.length > 0, "中央页签没有渲染出资源行");
+  mains[0].props.onClick();
+  centerTree = R.renderKeep(Center, {});
+  assert.ok(byClassAll(centerTree, "wc-flow").length > 0, "点击行没有展开生效链路");
+  assert.match(textOf(centerTree), /团队配置/, "生效链路里没有团队配置这一层");
 
-  // 设置页：勾选后应写入 storage。
+  // 设置页：勾选后应写入 storage；下方还要渲染出反馈区。
   const Settings = registered.settings.component;
   let settingsTree = R.renderFresh(Settings, {}, { effects: true });
   const box = findAll(settingsTree, (n) => n && n.type === "input")[0];
@@ -329,10 +368,11 @@ assert.equal(backToTeam["alpha@market"].effectiveState, "off");
   settingsTree = R.renderKeep(Settings, {});
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(ctx.storage._data["workspace-config.settings.v1"]?.showDesc, true, "设置没有写入 storage");
+  assert.match(textOf(settingsTree), /反馈/, "设置页没有渲染出反馈区");
 
   dispose();
   console.log("UI_OK panel/center/settings 渲染通过");
 }
 
-console.log("SMOKE_OK checks=59");
+console.log("SMOKE_OK checks=74");
 console.log("main.js", fs.statSync(MAIN).size, "bytes; manifest", MANIFEST.id);

@@ -126,6 +126,28 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 
 团队层有显式值时，「跟随」按钮改为「跟随团队（配置）」，tooltip 说明清除本地覆盖后会回到团队配置；meta 行追加「团队禁用 / 团队启用」。MCP 因 `deniedMcpServers` 跨层 union，团队层禁用后本地无法解除：meta 标注「本地不可解除」，并把「跟随」按钮置灰。
 
+### 6.2 诊断
+
+`scan` 额外返回 `diagnostics`，每项 `{ level, kind, id, name, message, fixable }`：
+
+| level | 场景 | 可清理 |
+|---|---|---|
+| `stale` | local 里有键，但对应插件 / 技能 / MCP 已不存在 | 是 |
+| `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖 | 否 |
+| `info` | 项目技能被同名个人技能遮蔽 | 否 |
+
+残留项之所以必须由诊断区处理：列表只列现存资源，这些键不在任何列表里，用户没有其他入口。清理复用 `setMany` 的 `inherit` 操作，不新增写命令。
+
+### 6.3 生效链路
+
+中央视图点击任意一行展开：
+
+```
+全局 → 团队配置 → 本地 → 最终
+```
+
+数据全部来自 `scan` 已有的四个状态字段，纯展示。侧栏（`compact`）不提供展开，保持简洁。
+
 ## 7. 已知限制
 
 1. ~~`skillOverrides` 的跨层合并需实测~~ 已实测（Claude Code 2.1.319）：项目层 `on` 能压过 user 层 `off`，双向成立，团队层同样参与

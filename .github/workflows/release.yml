@@ -1,0 +1,65 @@
+# 发版流水线：tag = manifest.version（无 v 前缀，脚本也接受 v 前缀）。
+# 推送 tag 触发：构建 → 校验 → 冒烟 → 比对 tag → 生成 checksums → 发 Release。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build main.js from sources
+        run: npm run build
+
+      - name: Ensure committed bundle is up to date
+        run: git diff --exit-code main.js
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Run smoke tests
+        run: npm run smoke
+
+      - name: Validate manifest
+        run: npm run validate
+
+      - name: Check tag matches manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(node -p "require('./manifest.json').version")"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "tag $TAG != manifest version $VERSION"
+            exit 1
+          fi
+
+      - name: Generate checksums
+        run: |
+          FILES="main.js manifest.json docs/icon.png"
+          [ -f styles.css ] && FILES="$FILES styles.css"
+          sha256sum $FILES > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release with plugin artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            main.js
+            manifest.json
+            docs/icon.png
+            checksums.txt

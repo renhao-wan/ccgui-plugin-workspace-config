@@ -1,0 +1,42 @@
+name: check
+
+# 每次 push / PR 都跑一遍：产物与源码一致、单测、冒烟、manifest 校验。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 共用库是 npm 依赖（ccgui-plugin-shared），必须装了才能 build。
+      - name: Install dependencies
+        run: npm ci
+
+      # 共用库钉在 tag 上。落后于包的最新 tag 只提醒不拦（退出码恒 0）。
+      - name: Check shared library version
+        run: npm run shared:check
+
+      - name: Build main.js from sources
+        run: npm run build
+
+      # 改了 src 忘了 build，或手改了 main.js：这里会失败。
+      - name: Ensure committed bundle is up to date
+        run: git diff --exit-code main.js
+
+      - name: Run unit tests
+        run: npm test
+
+      # 冒烟会临时落盘 config-io.mjs 并真实执行，Linux 上同样可用。
+      - name: Run smoke tests
+        run: npm run smoke
+
+      - name: Validate manifest
+        run: npm run validate
