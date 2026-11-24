@@ -157,6 +157,20 @@ const STYLE = `
 .wc-btn + .wc-btn { border-left: 1px solid rgba(127,127,127,.22); }
 .wc-btn.wc-on { background: rgba(79,140,255,.16); font-weight: 600; }
 .wc-btn:disabled { opacity: .38; cursor: default; }
+/* 侧栏窄：技能四态改成下拉，省下的宽度全给名字 */
+.wc-select { flex: none; max-width: 92px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
+.wc-select:disabled { opacity: .38; cursor: default; }
+.wc-seg-unknown { padding: 0; }
+/* 项目 .mcp.json 的审批：和「禁用」并排的第二根轴 */
+.wc-row-actions { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.wc-approval { display: flex; align-items: center; gap: 5px; }
+.wc-appr-dot { font-size: 10.5px; line-height: 16px; padding: 0 7px; border-radius: 999px; background: rgba(127,127,127,.12); opacity: .8; white-space: nowrap; }
+.wc-appr-pending { background: rgba(230,150,40,.18); color: #b26a00; opacity: 1; }
+.wc-appr-approved { background: rgba(46,160,67,.16); opacity: 1; }
+.wc-appr-rejected { background: rgba(217,83,79,.16); color: #c92a2a; opacity: 1; }
+.wc-appr-btn { font: inherit; font-size: 10.5px; padding: 1px 6px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; opacity: .6; white-space: nowrap; }
+.wc-appr-btn:hover { opacity: 1; }
+.wc-appr-btn:disabled { opacity: .3; cursor: default; }
 .wc-badge { flex: none; font-size: 11px; padding: 4px 9px; border-radius: 10px; background: rgba(127,127,127,.14); opacity: .8; }
 .wc-empty { margin: 10px 0; font-size: 12px; opacity: .5; }
 .wc-err { margin: 8px 0; color: #d9534f; white-space: pre-wrap; }
@@ -172,6 +186,7 @@ const STYLE = `
 .wc-pick:hover { opacity: .8; }
 .wc-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: rgba(127,127,127,.4); }
 .wc-dot.on { background: #37b24d; }
+.wc-dot.name-only, .wc-dot.user-invocable-only { background: #f59f00; }
 .wc-dot.off { background: rgba(127,127,127,.45); }
 .wc-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; }
 .wc-stat { padding: 12px 14px; border: 1px solid rgba(127,127,127,.14); border-radius: 10px; background: rgba(127,127,127,.04); }
@@ -398,6 +413,27 @@ export default function activate(ctx) {
     }
   }
 
+  /** 项目 .mcp.json 的审批是另一根轴，走单独的写命令，不碰 deniedMcpServers。 */
+  async function applyApproval(row, next) {
+    if (!store.ws) return;
+    const key = "mcpApproval:" + row.id;
+    set({ busy: key, error: "", note: "" });
+    try {
+      const res = await runIo(["set", store.ws, "mcpApproval", row.id, next]);
+      await refresh(store.ws);
+      // 总开关开着时「待批准」写不进去，如实说明，别让用户以为点成功了。
+      if (next === "pending" && res.effective === "approved") {
+        set({ note: "已从逐个名单移除，但本项目开着「全部批准 .mcp.json」，实际仍是批准的。" });
+      } else {
+        set({ note: "审批已改为「" + (APPROVAL_WORD[next] || next) + "」，下次会话生效。" });
+      }
+    } catch (err) {
+      set({ error: String((err && err.message) || err) });
+    } finally {
+      set({ busy: "" });
+    }
+  }
+
   /** 批量写：一次子进程落盘全部改动，再刷新一次。 */
   async function applyMany(ops, label) {
     if (!store.ws || !ops.length) return;
@@ -546,13 +582,78 @@ export default function activate(ctx) {
       const src = row.scope === "plugin"
         ? "继承自插件 " + (row.plugin || "内置")
         : "继承 " + row.scope;
-      return ["MCP", src, g, team].filter(Boolean).join(" · ");
+      // 审批只对项目 .mcp.json 定义的 server 存在；其余来源没有这一步。
+      const appr = row.projectDefined
+        ? (row.allApproved && row.approval === "approved" ? "全部批准" : APPROVAL_WORD[row.approval] || "")
+        : "";
+      return ["MCP", src, g, team, appr].filter(Boolean).join(" · ");
     }
     const src = row.source === "plugin"
       ? "插件 " + (row.plugin || "")
       : row.source === "personal" ? "个人" : "项目";
     const g = row.globalState === "off" ? "全局禁用" : "全局可用";
     return ["技能", src, g, team, row.shadowed ? "同名个人版优先" : ""].filter(Boolean).join(" · ");
+  }
+
+  // 技能的取值有四种（on / name-only / user-invocable-only / off），
+  // 最后两个不是「禁用」，压成开/关会在用户点「启用」时把原值改掉。
+  const SKILL_WORD = {
+    on: "启用",
+    "name-only": "仅名称",
+    "user-invocable-only": "仅手动",
+    off: "禁用",
+    unknown: "其它",
+    inherit: "跟随",
+  };
+  const SKILL_TIP = {
+    on: "名称和描述都给 Claude，也在 / 菜单里",
+    "name-only": "只把名称给 Claude，省掉描述；仍在 / 菜单里",
+    "user-invocable-only": "对 Claude 隐藏，只能在 / 菜单手动调用",
+    off: "对 Claude 和 / 菜单都隐藏",
+    unknown: "是本插件不认识的取值；为避免改坏，这里只显示、不写入",
+  };
+
+  const APPROVAL_WORD = {
+    pending: "待批准",
+    approved: "已批准",
+    rejected: "已拒绝",
+  };
+  const APPROVAL_TIP = {
+    pending: "项目 .mcp.json 里定义了它，但还没在 Claude Code 里批准；本次会话不会连接。",
+    approved: "已批准，Claude Code 会连接它。",
+    rejected: "已在项目里拒绝，优先于「全部批准」；改动后新会话生效。",
+  };
+
+  /**
+   * 项目 .mcp.json 定义的 server 还要单独走一道审批，和「禁用」是两码事：
+   * 禁用写在 deniedMcpServers，审批写在 enabled/disabledMcpjsonServers。
+   * 两者都成立才算真的连上，所以分开摆在同一个行里。
+   */
+  function ApprovalSeg({ row, compact }) {
+    if (!row.projectDefined) return null;
+    const busyKey = "mcpApproval:" + row.id;
+    const busy = store.busy === busyKey;
+    const state = row.approval || "pending";
+    const cycle = state === "approved" ? "rejected" : "approved";
+    // 总开关开着时，单个「待批准」做不到：只能批准或拒绝，界面要说清楚。
+    const lockPending = row.allApproved && state === "approved";
+    return h("div", { className: "wc-approval" },
+      h("span", {
+        className: "wc-appr-dot wc-appr-" + state,
+        title: APPROVAL_TIP[state] + (lockPending
+          ? "（当前项目开了「全部批准」，无法单独回到待批准）" : ""),
+      }, APPROVAL_WORD[state] || state),
+      h("button", {
+        type: "button",
+        className: "wc-appr-btn",
+        disabled: busy,
+        title: "切成「" + (APPROVAL_WORD[cycle] || cycle) + "」",
+        onClick: () => {
+          if (busy) return;
+          void applyApproval(row, cycle);
+        },
+      }, busy ? "…" : (compact ? "" : "改为" + (APPROVAL_WORD[cycle] || cycle)))
+    );
   }
 
   function Seg({ row, compact }) {
@@ -571,21 +672,55 @@ export default function activate(ctx) {
     const followDead = row.kind === "mcp" && row.sharedState === "off";
     const opts = row.kind === "mcp"
       ? [[followLabel, "inherit"], [compact ? "关闭" : "项目禁用", "off"]]
-      : [
-          [followLabel, "inherit"],
-          [compact ? "开" : "启用", "on"],
-          [compact ? "关" : "禁用", "off"],
-        ];
+      : row.kind === "skill"
+        ? [
+            [followLabel, "inherit"],
+            [SKILL_WORD.on, "on"],
+            [SKILL_WORD["name-only"], "name-only"],
+            [SKILL_WORD["user-invocable-only"], "user-invocable-only"],
+            [SKILL_WORD.off, "off"],
+          ]
+        : [
+            [followLabel, "inherit"],
+            [compact ? "开" : "启用", "on"],
+            [compact ? "关" : "禁用", "off"],
+          ];
+    // 不认识的取值只展示，不给按钮——任何点击都会覆盖掉原有设置。
+    if (row.kind === "skill" && active === "unknown") {
+      return h("div", { className: "wc-seg wc-seg-unknown" },
+        h("span", { className: "wc-btn wc-on", title: SKILL_TIP.unknown }, "其它取值")
+      );
+    }
+    const disabledFor = (value) =>
+      row.busy || (value === "on" && !row.allowOn) || (value === "inherit" && followDead);
+    // 侧栏只有一行的宽度：技能有五档，摆成一排按钮会把名字挤没，改用下拉。
+    if (compact && opts.length > 3) {
+      const current = opts.some(([, value]) => value === active) ? active : "inherit";
+      return h("select", {
+        className: "wc-select" + (row.busy ? " wc-busy" : ""),
+        disabled: row.busy,
+        title: "技能可见性：" + (SKILL_TIP[active] || ""),
+        value: current,
+        onChange: (e) => {
+          const value = e.target.value;
+          if (row.busy || value === current) return;
+          void apply(row, value);
+        },
+      },
+        opts.map(([label, value]) =>
+          h("option", { key: value, value, disabled: disabledFor(value) }, label))
+      );
+    }
     return h("div", { className: "wc-seg" },
       opts.map(([label, value]) =>
         h("button", {
           key: value,
           type: "button",
           className: "wc-btn" + (active === value ? " wc-on" : ""),
-          disabled: row.busy || (value === "on" && !row.allowOn) || (value === "inherit" && followDead),
+          disabled: disabledFor(value),
           title: value === "on" && !row.allowOn
             ? "当前无法启用"
-            : value === "inherit" ? followTitle : undefined,
+            : value === "inherit" ? followTitle : (SKILL_TIP[value] || undefined),
           onClick: () => {
             if (row.busy || active === value) return;
             void apply(row, value);
@@ -597,31 +732,52 @@ export default function activate(ctx) {
 
   function effectiveLabel(row) {
     if (row.effectiveState === "on") return "生效：开";
-    if (row.effectiveState === "off") return "生效：关";
+    if (row.effectiveState === "name-only") return "生效：仅名称";
+    if (row.effectiveState === "user-invocable-only") return "生效：仅手动调用";
+    if (row.effectiveState === "off") {
+      // 被「没批准」挡掉和「被禁用」是两回事，绿点变灰时要说得出原因。
+      if (row.kind === "mcp" && row.approval === "pending") return "生效：关（项目里还没批准）";
+      if (row.kind === "mcp" && row.approval === "rejected") return "生效：关（项目里已拒绝）";
+      return "生效：关";
+    }
     return "生效：未知";
   }
 
   /* ------------------------------------------------------------ 生效链路 */
 
   const LAYER_WORD = {
-    team: { inherit: "未设置", on: "启用", off: "禁用" },
-    local: { inherit: "跟随", on: "启用", off: "禁用" },
-    effective: { on: "开", off: "关", unknown: "未知" },
+    team: { inherit: "未设置", on: "启用", "name-only": "仅名称", "user-invocable-only": "仅手动", off: "禁用", unknown: "其它" },
+    local: { inherit: "跟随", on: "启用", "name-only": "仅名称", "user-invocable-only": "仅手动", off: "禁用", unknown: "其它" },
+    effective: { on: "开", "name-only": "仅名称", "user-invocable-only": "仅手动", off: "关", unknown: "未知" },
   };
 
   function flowSteps(row) {
     const globalWord = row.kind === "mcp"
       ? (row.globalState === "off" ? "禁用" : "可用")
-      : (row.globalState === "on" ? "启用" : row.globalState === "off" ? "禁用" : "未记录");
-    return [
+      : (LAYER_WORD.local[row.globalState] || "未记录");
+    const steps = [
       { label: "全局", value: globalWord },
       { label: "团队配置", value: LAYER_WORD.team[row.sharedState || "inherit"] },
       { label: "本地", value: LAYER_WORD.local[row.localState || "inherit"] },
       { label: "最终", value: LAYER_WORD.effective[row.effectiveState] || "未知", strong: true },
     ];
+    // 项目 .mcp.json 的 server 还多一道审批，不写进链路用户会以为「本地已启用」就够了。
+    if (row.kind === "mcp" && row.projectDefined) {
+      steps.splice(3, 0, {
+        label: "审批",
+        value: (row.allApproved && row.approval === "approved" ? "全部批准" : APPROVAL_WORD[row.approval]) || "未知",
+      });
+    }
+    return steps;
   }
 
   function flowNote(row) {
+    if (row.kind === "mcp" && row.approval === "pending") {
+      return "项目 .mcp.json 里定义了它，但还没批准，本次会话不会连接；点上方「待批准」旁的按钮改为已批准后，下次会话生效。";
+    }
+    if (row.kind === "mcp" && row.approval === "rejected") {
+      return "已在项目里拒绝这个 server。拒绝优先于「全部批准」，改成已批准后才会连接。";
+    }
     if (row.kind === "mcp" && row.sharedState === "off") {
       return "团队配置里禁用了它。MCP 的禁用名单跨层合并，本地无法解除；要恢复请修改仓库的 .claude/settings.json。";
     }
@@ -679,7 +835,8 @@ export default function activate(ctx) {
         },
           h("div", { className: "wc-name" },
             h("span", {
-              className: "wc-dot " + (row.effectiveState === "on" ? "on" : "off"),
+              // 中间两态用黄点：既不是完全开着，也不是关掉，绿/灰都不准确。
+              className: "wc-dot " + (row.effectiveState === "on" ? "on" : row.effectiveState === "off" ? "off" : "name-only"),
               title: effectiveLabel(row),
               "aria-label": effectiveLabel(row),
             }),
@@ -697,7 +854,12 @@ export default function activate(ctx) {
               title: "这个技能随插件加载，不能单独关闭；要禁用它，请在「插件」里关闭 "
                 + (row.plugin || "所属插件"),
             }, "随插件")
-          : h(Seg, { row: v, compact })
+          : row.kind === "mcp" && row.projectDefined
+            ? h("div", { className: "wc-row-actions" },
+                h(Seg, { row: v, compact }),
+                h(ApprovalSeg, { row: v, compact })
+              )
+            : h(Seg, { row: v, compact })
       ),
       open && expandable ? h(Flow, { row }) : null
     );

@@ -21,6 +21,8 @@ import {
   setPluginState,
   getMcpState,
   setMcpState,
+  getMcpApproval,
+  setMcpApproval,
   getSkillState,
   setSkillState,
   effectiveState,
@@ -235,6 +237,24 @@ function scan(ws) {
     ? globalSettings.deniedMcpServers
     : [];
 
+  // 项目 .mcp.json 的审批结果同样写在 settings.local.json；团队层与全局层也可能
+  // 设过。布尔开关按 local > shared > 全局 取值，两个名单取并集——拒绝优先，
+  // 所以并集不会把某一层的拒绝「合并掉」。
+  const approvalLayer = (() => {
+    const out = {};
+    for (const layer of [globalSettings, shared, local]) {
+      if (layer.enableAllProjectMcpServers !== undefined) {
+        out.enableAllProjectMcpServers = layer.enableAllProjectMcpServers;
+      }
+      for (const key of ["enabledMcpjsonServers", "disabledMcpjsonServers"]) {
+        if (Array.isArray(layer[key])) {
+          out[key] = [...new Set([...(out[key] || []), ...layer[key]])];
+        }
+      }
+    }
+    return out;
+  })();
+
   const mcp = [...mcpNames].sort().map((name) => {
     const scopes = [];
     if (localMcp[name]) scopes.push("local");
@@ -249,6 +269,12 @@ function scan(ws) {
       || (pluginEntry && pluginEntry.config) || null;
     const projectState = getMcpState(projectLayer, name);
     const globalState = deniedGlobally ? "off" : "on";
+    // 审批只对来自项目 .mcp.json 的定义有意义；user/local/plugin 来源不弹这个窗。
+    const approval = projectMcp[name] ? getMcpApproval(approvalLayer, name) : null;
+    const projectDenied = getMcpState(projectLayer, name) === "off";
+    // 未批准、已拒绝都等于「没连上」。以前只看 denylist，会把待审批的 server
+    // 显示成绿点生效——这正是本项目最容易误导人的地方。
+    const connected = !deniedGlobally && !projectDenied && approval !== "pending" && approval !== "rejected";
     return {
       kind: "mcp",
       id: name,
@@ -262,7 +288,10 @@ function scan(ws) {
       localState: getMcpState(local, name),
       sharedState: getMcpState(shared, name),
       canEnable: !deniedGlobally,
-      effectiveState: deniedGlobally ? "off" : effectiveState(projectState, "on"),
+      projectDefined: Boolean(projectMcp[name]),
+      approval,
+      allApproved: approvalLayer.enableAllProjectMcpServers === true,
+      effectiveState: connected ? effectiveState(projectState, "on") : "off",
     };
   });
 
@@ -282,8 +311,10 @@ function scan(ws) {
   const globalOverrides = globalSettings.skillOverrides || {};
   const seen = new Map();
   const skillRows = skills.map((s) => {
-    const globalRaw = globalOverrides[s.name];
-    const globalState = globalRaw === "off" ? "off" : "on";
+    // 全局层同样是四态，压成 on/off 会让「仅名称」看起来像完整启用。
+    const globalState = Object.prototype.hasOwnProperty.call(globalOverrides, s.name)
+      ? getSkillState(globalSettings, s.name)
+      : "on";
     const projectState = getSkillState(projectLayer, s.name);
     const row = {
       kind: "skill",
@@ -363,6 +394,10 @@ function scan(ws) {
   for (const row of mcp) {
     if (row.sharedState === "off") {
       diag("warn", "mcp", row.id, row.name, "团队配置已禁用，本地无法解除", false);
+    }
+    // 待审批是「看起来配了、其实没连」，比报错更难发现，必须单独提示。
+    if (row.approval === "pending") {
+      diag("warn", "mcp", row.id, row.name, "项目 .mcp.json 里定义但尚未批准，本次会话不会连接", false);
     }
   }
 
@@ -551,12 +586,17 @@ function set(ws, kind, id, state) {
   const localPath = path.join(ws, PROJECT_SETTINGS_REL);
   const current = readJson(localPath) || {};
   let next;
+  let effective;
   if (kind === "plugin") next = setPluginState(current, id, state);
   else if (kind === "mcp") next = setMcpState(current, id, state);
   else if (kind === "skill") next = setSkillState(current, id, state);
-  else throw new Error("未知类型：" + kind);
+  else if (kind === "mcpApproval") {
+    const out = setMcpApproval(current, id, state);
+    next = out.settings;
+    effective = out.effective;
+  } else throw new Error("未知类型：" + kind);
   writeJsonAtomic(localPath, next);
-  return { ok: true, file: localPath, settings: next };
+  return { ok: true, file: localPath, settings: next, effective };
 }
 
 /** 一次写完多条：同类型共用一个文件，避免每行起一次子进程。 */
@@ -579,6 +619,7 @@ function setMany(ws, opsJson) {
     if (kind === "plugin") next = setPluginState(next, id, state);
     else if (kind === "mcp") next = setMcpState(next, id, state);
     else if (kind === "skill") next = setSkillState(next, id, state);
+    else if (kind === "mcpApproval") next = setMcpApproval(next, id, state).settings;
     else throw new Error("未知类型：" + kind);
     applied += 1;
   }

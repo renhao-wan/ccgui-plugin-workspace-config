@@ -1,6 +1,6 @@
 # 工作区配置 workspace-config — 设计方案
 
-日期：2026-11-23
+日期：2026-11-24
 状态：v0.1.0 已实现核心链路
 
 ## 1. 目标
@@ -42,18 +42,43 @@ Claude Code 本身有项目级覆盖机制，但散落在三个键、三套语�
 
 ### 2.3 技能
 
-- 键：`skillOverrides`（scope 为 `Any file`），值支持 `on` / `name-only` / `user-invocable-only` / `off`
-- personal / project 技能：三态完整
+- 键：`skillOverrides`（scope 为 `Any file`），官方是**四态**：
+
+| 值 | 对 Claude | 在 `/` 菜单 | 界面文案 |
+|---|---|---|---|
+| `on`（缺省） | 名称 + 描述 | 可见 | 启用 |
+| `name-only` | 只有名称 | 可见 | 仅名称 |
+| `user-invocable-only` | 隐藏 | 可见（标记 `user-only`） | 仅手动 |
+| `off` | 隐藏 | 隐藏（Remote Control、Agent SDK 的命令列表也一起隐藏） | 禁用 |
+
+- personal / project 技能：`inherit` + 四态共五档
 - **plugin 提供的技能不受 `skillOverrides` 控制**（官方文档明确），只能关闭整个插件
 - 同名技能：`enterprise > personal > project`，个人版压过项目版；`skillOverrides` 按名字生效，不区分来源
+- 读不认识的取值时返回 `unknown`，界面只显示「其它取值」、不渲染按钮——把它猜成 `on` 会误导，而任何一次写入都会覆盖掉用户原值
 
 因此技能栏按来源分流：
 
 | 来源 | 面板行为 |
 |---|---|
-| personal | 三态开关 |
-| project | 三态开关 |
+| personal | 五档开关（侧栏因宽度改下拉） |
+| project | 五档开关 |
 | plugin | 只读，显示「由插件控制」 |
+
+### 2.4 项目 `.mcp.json` 的审批
+
+`<ws>/.mcp.json` 里定义的 server 还要单独走一道审批，Claude Code 把结果写在 **`.claude/settings.local.json`**（正是本插件独占的文件），三个键：
+
+| 键 | 含义 |
+|---|---|
+| `enableAllProjectMcpServers` | 布尔总开关，全部批准、不再弹窗 |
+| `enabledMcpjsonServers` | 逐个批准 |
+| `disabledMcpjsonServers` | 逐个拒绝，**优先级高于前两者** |
+
+三者都没覆盖时是「待审批」：不连接，也不出现在会话里。审批与「禁用」是**两根轴**——禁用写 `deniedMcpServers`，审批写这三个键；两者都通过才真正连上，所以界面在同一行里并排显示，`effectiveState` 同时考虑两者。
+
+`enableAllProjectMcpServers` 为 `true` 时，单个 server 无法回到「待审批」（Claude Code 的语义，不是本插件能改的）；`setMcpApproval` 因此返回 `effective`，界面据此提示「实际仍是批准的」。
+
+审批只对 `project` 来源有定义；`local` / `user` / `plugin` 来源的 server 不弹这个窗，界面也不显示审批控件。
 
 ## 3. 架构
 
@@ -80,16 +105,21 @@ main.js（单文件 ESM）
 | `scripts/build.mjs` | 内联 model 与 config-io，产出单文件 main.js | build 自检 |
 | `src/main.head.js` | UI、store、exec 调用 | 由 smoke 间接覆盖 |
 
-## 4. 三态模型
+## 4. 状态模型
 
 ```js
-projectState: "inherit" | "on" | "off"
+projectState: "inherit" | "on" | "off"                      // 插件、MCP
+projectState: "inherit" | "on" | "name-only"
+            | "user-invocable-only" | "off"                  // 技能
+approval:    "pending" | "approved" | "rejected" | null      // 仅 project 来源的 MCP
 effectiveState = projectState === "inherit" ? globalState : projectState
+               // MCP 再叠加「是否真的连上」：禁用或被审批挡住都是 off
 ```
 
 - `inherit` 表示不写键，改回 `inherit` 会删除对应条目并清理空对象/空数组
 - MCP 的 `on` 在写入层直接拒绝
 - 全局状态只用于展示，不参与写入决策
+- 审批与禁用分开存储、分开写入：`mcpApproval` 是一个独立的写操作，不碰 `deniedMcpServers`
 
 ## 5. 读取范围
 
@@ -101,7 +131,7 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | `~/.claude/plugins/cache/**/skills/*/SKILL.md` | plugin 技能 |
 | `~/.claude/skills/*/SKILL.md` | personal 技能 |
 | `<ws>/.claude/skills/*/SKILL.md` | project 技能 |
-| `<ws>/.mcp.json` | project MCP |
+| `<ws>/.mcp.json` | project MCP；其审批结果在 `settings.local.json` 的三个 `*McpjsonServers` / `enableAllProjectMcpServers` 键里 |
 | `<ws>/.claude/settings.json` | 团队配置（只读，用于展示冲突） |
 | `<ws>/.claude/settings.local.json` | 读写目标 |
 | `~/.claude/projects/<slug>/memory/*.md` | 自动记忆（只读浏览，见 6.4） |
@@ -123,7 +153,7 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | `localState` | 只看 `.claude/settings.local.json` | **控件选中态**、批量统计、覆盖筛选 |
 | `sharedState` | 只看 `.claude/settings.json` | 标记团队来源 |
 | `projectState` | local 压过 shared 的合并结果 | 排序、生效计算 |
-| `effectiveState` | 再叠上全局后的最终值 | 绿点提示 |
+| `effectiveState` | 再叠上全局后的最终值；MCP 还要通过审批 | 圆点提示（开绿、中间态黄、关灰） |
 
 团队层有显式值时，「跟随」按钮改为「跟随团队（配置）」，tooltip 说明清除本地覆盖后会回到团队配置；meta 行追加「团队禁用 / 团队启用」。MCP 因 `deniedMcpServers` 跨层 union，团队层禁用后本地无法解除：meta 标注「本地不可解除」，并把「跟随」按钮置灰。
 
@@ -136,7 +166,7 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 | level | 场景 | 可清理 |
 |---|---|---|
 | `stale` | local 里有键，但对应插件 / 技能 / MCP 已不存在 | 是 |
-| `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖 | 否 |
+| `warn` | 全局启用但未安装；团队层禁用的 MCP；插件技能被本地覆盖；项目 `.mcp.json` 的 server 待审批 | 否 |
 | `info` | 项目技能被同名个人技能遮蔽 | 否 |
 
 残留项之所以必须由诊断区处理：列表只列现存资源，这些键不在任何列表里，用户没有其他入口。清理复用 `setMany` 的 `inherit` 操作，不新增写命令。
@@ -146,10 +176,10 @@ effectiveState = projectState === "inherit" ? globalState : projectState
 中央视图点击任意一行展开：
 
 ```
-全局 → 团队配置 → 本地 → 最终
+全局 → 团队配置 → 本地 → [审批] → 最终
 ```
 
-数据全部来自 `scan` 已有的四个状态字段，纯展示。侧栏（`compact`）不提供展开，保持简洁。
+数据全部来自 `scan` 已有的状态字段，纯展示。`[审批]` 只对项目 `.mcp.json` 定义的 server 出现。侧栏（`compact`）不提供展开，保持简洁。
 
 ### 6.4 记忆浏览（只读）
 
@@ -179,10 +209,11 @@ node config-io.mjs memoryRead <workspace> <path> 读正文
 1. ~~`skillOverrides` 的跨层合并需实测~~ 已实测（Claude Code 2.1.319）：项目层 `on` 能压过 user 层 `off`，双向成立，团队层同样参与
 2. MCP 只有 deny 语义，没有反向启用
 3. plugin 技能无法单独禁用
-4. 共享包 `validate-core` 未覆盖 `registerPanelTab` 的权限检测，产生一条固定 warn
-5. 远程工作区（`host:workspace:remote`）下 `exec:node` 的执行位置未验证
+4. 项目 `.mcp.json` 的「待审批」在 `enableAllProjectMcpServers: true` 时不可达，界面只能提示
+5. 共享包 `validate-core` 未覆盖 `registerPanelTab` 的权限检测，产生一条固定 warn
+6. 远程工作区（`host:workspace:remote`）下 `exec:node` 的执行位置未验证
 
 ## 8. 测试
 
-- 11 条纯逻辑单测：三态读写、空键清理、保留非托管键、生效态
-- 164 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写
+- 17 条纯逻辑单测：三态读写、技能四态往返与 `unknown` 只读、`.mcp.json` 审批（拒绝优先、名单互斥、总开关语义）、空键清理、保留非托管键、生效态
+- 206 项冒烟检查：临时 HOME + 真实落盘脚本，覆盖 scan / set / 再 scan / 还原，并断言全局文件未被修改；技能四态与 `.mcp.json` 审批包含「待审批的 server 不显示成生效」「name-only 不被改写」「总开关开着时 pending 如实回报」等回归断言；记忆动作包含 slug 派生、三类来源、索引排序、白名单外拒读、空工作区兜底。另用 fake-react 真实渲染右侧面板、中央页签与设置页，包含团队层 fixture、五档按钮与侧栏下拉、审批控件写盘、诊断识别与清理、生效链路展开、页签固定位置与切换归顶、左导航切换与覆盖数徽标、顶部区收起/展开、记忆列表与 Markdown 正文渲染。检查项数由 `assert` 计数包装统计，不再手写

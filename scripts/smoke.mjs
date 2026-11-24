@@ -62,7 +62,10 @@ fs.writeFileSync(
   path.join(claude, "plugins", "installed_plugins.json"),
   JSON.stringify({ plugins: { "alpha@market": [{ scope: "user", installPath: pluginDir }] } }, null, 2),
 );
-fs.writeFileSync(path.join(ws, ".mcp.json"), JSON.stringify({ mcpServers: { "proj-one": { type: "stdio" } } }, null, 2));
+fs.writeFileSync(
+  path.join(ws, ".mcp.json"),
+  JSON.stringify({ mcpServers: { "proj-one": { type: "stdio" } } }, null, 2),
+);
 
 // 从构建产物里取出 SCAN_SOURCE（build.mjs 用 JSON.stringify 生成，单行字面量）。
 const mainText = fs.readFileSync(MAIN, "utf8");
@@ -197,6 +200,63 @@ run(["set", ws, "skill", "project-skill", "inherit"]);
 const restored = JSON.parse(fs.readFileSync(localPath, "utf8"));
 assert.deepEqual(restored, {}, "全部改回跟随全局后不应留下空键");
 
+/* ------------------------------------------------------------ 技能四态 & .mcp.json 审批 */
+
+// 技能官方是四态：只把值原样读出，不能把 name-only 折成 on。
+run(["set", ws, "skill", "project-skill", "name-only"]);
+let s4 = run(["scan", ws]).skills.find((s) => s.name === "project-skill");
+assert.equal(s4.localState, "name-only", "name-only 不能被读成 on");
+assert.equal(s4.effectiveState, "name-only");
+
+run(["set", ws, "skill", "project-skill", "user-invocable-only"]);
+s4 = run(["scan", ws]).skills.find((s) => s.name === "project-skill");
+assert.equal(s4.localState, "user-invocable-only");
+assert.equal(s4.effectiveState, "user-invocable-only");
+run(["set", ws, "skill", "project-skill", "inherit"]);
+
+// 项目 .mcp.json 里的 server 默认是「待批准」：没连上，不能显示成生效。
+const appr0 = byId(run(["scan", ws]).mcp)["proj-one"];
+assert.equal(appr0.projectDefined, true);
+assert.equal(appr0.approval, "pending");
+assert.equal(appr0.effectiveState, "off", "待审批的 server 不该显示成生效");
+assert.equal(mcp.tavily.approval, null, "user 来源的 server 不参与 .mcp.json 审批");
+const pendingDiag = run(["scan", ws]).diagnostics.find((d) => d.kind === "mcp" && d.id === "proj-one");
+assert.equal(pendingDiag.level, "warn");
+assert.equal(pendingDiag.fixable, false);
+
+// 逐个批准 → 连接
+const approvedRes = run(["set", ws, "mcpApproval", "proj-one", "approved"]);
+assert.equal(approvedRes.effective, "approved");
+assert.deepEqual(JSON.parse(fs.readFileSync(localPath, "utf8")).enabledMcpjsonServers, ["proj-one"]);
+let apprRow = byId(run(["scan", ws]).mcp)["proj-one"];
+assert.equal(apprRow.approval, "approved");
+assert.equal(apprRow.effectiveState, "on");
+
+// 拒绝优先于「全部批准」，且写进 disabled 名单
+run(["set", ws, "mcpApproval", "proj-one", "rejected"]);
+apprRow = byId(run(["scan", ws]).mcp)["proj-one"];
+assert.equal(apprRow.approval, "rejected");
+assert.equal(apprRow.effectiveState, "off");
+assert.deepEqual(JSON.parse(fs.readFileSync(localPath, "utf8")).disabledMcpjsonServers, ["proj-one"]);
+
+// 回到待批准：两个名单都清掉，空数组不落盘
+run(["set", ws, "mcpApproval", "proj-one", "pending"]);
+assert.deepEqual(JSON.parse(fs.readFileSync(localPath, "utf8")), {}, "审批名单清空后不该留下空数组");
+assert.equal(byId(run(["scan", ws]).mcp)["proj-one"].approval, "pending");
+
+// 总开关开着时单个「待批准」做不到，写入要如实回报生效值
+fs.writeFileSync(localPath, JSON.stringify({ enableAllProjectMcpServers: true }, null, 2));
+apprRow = byId(run(["scan", ws]).mcp)["proj-one"];
+assert.equal(apprRow.approval, "approved");
+assert.equal(apprRow.allApproved, true);
+assert.equal(run(["set", ws, "mcpApproval", "proj-one", "pending"]).effective, "approved");
+assert.equal(
+  JSON.parse(fs.readFileSync(localPath, "utf8")).enableAllProjectMcpServers,
+  true,
+  "单个审批不能顺带改总开关",
+);
+fs.writeFileSync(localPath, "{}");
+
 /* ------------------------------------------------------------ 团队层 */
 
 // 仓库里的 .claude/settings.json（团队层）：面板只读，写入永远只落 local。
@@ -318,8 +378,12 @@ assert.equal(bareMem.files.some((f) => f.source === "auto"), false, "没有自�
 // UI 段之前留一条有效覆盖：导航的「覆盖数」徽标需要有真实数据才测得出来。
 // 放在这里而不是 UI 段内部，是因为 Panel 与 Center 共用同一个 store，
 // Center 打开时不会重新扫描，中途改文件不会被看到。
+// proj-one 显式批准：否则「待批准」会产出一条诊断，后面验不了「无诊断时整块不渲染」。
+// project-skill 用 name-only：验证四态在界面上按原值显示，而不是被折成「启用」。
 fs.writeFileSync(localPath, JSON.stringify({
   enabledPlugins: { "alpha@market": false },
+  enabledMcpjsonServers: ["proj-one"],
+  skillOverrides: { "project-skill": "name-only" },
 }, null, 2));
 
 // 真实渲染面板与中央页签：未定义变量、组件调用写错这类问题只有渲染时才暴露。
@@ -420,6 +484,19 @@ fs.writeFileSync(localPath, JSON.stringify({
     const refAfter = byClassAll(tree, "wc-scroll")[0].props.ref;
     assert.equal(refAfter.current.scrollTop, 0, "切换页内页签后没有回到顶部");
     assert.ok(byClassAll(tree, "wc-tab").length === 3, "切换页签后页签条不完整");
+
+    // 侧栏宽度不够摆五档：技能要用下拉，且当前值要落在 name-only 上。
+    byClassAll(tree, "wc-tab")[2].props.onClick();
+    tree = R.renderKeep(Panel, { workspacePath: ws });
+    const skillRowPanel = byClassAll(tree, "wc-row").find((n) => textOf(n).includes("project-skill"));
+    assert.ok(skillRowPanel, "侧栏技能列表缺少 project-skill");
+    const selects = byClassAll(skillRowPanel, "wc-select");
+    assert.equal(selects.length, 1, "侧栏技能应渲染成一个下拉而不是五个按钮");
+    assert.equal(byClassAll(skillRowPanel, "wc-seg").length, 0, "侧栏技能不该同时渲染按钮组");
+    assert.equal(selects[0].props.value, "name-only", "侧栏下拉的当前值应与文件里的 name-only 一致");
+    assert.ok(!textOf(tree).includes("undefined"), "侧栏技能下拉文案里出现了 undefined");
+    byClassAll(tree, "wc-tab")[1].props.onClick();
+    tree = R.renderKeep(Panel, { workspacePath: ws });
   }
 
 
@@ -508,6 +585,56 @@ fs.writeFileSync(localPath, JSON.stringify({
   })[0];
   assert.equal(searchAfter.props.value, "", "切类别后搜索词应清空");
   assert.match(String(searchAfter.props.placeholder), /技能/, "搜索框占位应显示当前类别");
+  // 四态按钮：五档都要在，且选中态落在 name-only 上（不能被折成「启用」）。
+  {
+    const skillRow = byClassAll(detailAfter, "wc-row").find((n) => textOf(n).includes("project-skill"));
+    assert.ok(skillRow, "技能列表缺少 project-skill");
+    const btns = byClassAll(skillRow, "wc-btn");
+    assert.equal(btns.length, 5, "技能应当有五档（跟随 + 四态）");
+    assert.match(textOf(skillRow), /仅名称/);
+    const onBtn = btns.find((b) => textOf(b) === "仅名称");
+    assert.ok(onBtn.props.className.includes("wc-on"), "name-only 应处于选中态");
+    const enableBtn = btns.find((b) => textOf(b) === "启用");
+    assert.ok(!enableBtn.props.className.includes("wc-on"), "name-only 不该被显示成启用");
+    const dot = byClassAll(skillRow, "wc-dot")[0];
+    assert.ok(dot.props.title.includes("仅名称"), "圆点说明应反映 name-only");
+  }
+  // .mcp.json 审批：MCP 行要出现审批控件，已批准时显示「已批准」。
+  {
+    const mcpIdx = byClassAll(centerTree, "wc-nav-item").findIndex((n) => textOf(n).includes("MCP"));
+    byClassAll(centerTree, "wc-nav-item")[mcpIdx].props.onClick();
+    centerTree = R.renderKeep(Center, {});
+    const detailMcp = byClassAll(centerTree, "wc-detail")[0];
+    const projRow = byClassAll(detailMcp, "wc-row").find((n) => textOf(n).includes("proj-one"));
+    assert.ok(projRow, "MCP 列表缺少 proj-one");
+    assert.equal(byClassAll(projRow, "wc-row-actions").length, 1, "项目 .mcp.json 的 server 应多出一个审批控件");
+    const apprDot = byClassAll(projRow, "wc-appr-approved")[0];
+    assert.ok(apprDot, "已批准的项目 MCP 应显示批准态");
+    assert.match(textOf(projRow), /已批准/);
+    const btn = byClassAll(projRow, "wc-appr-btn")[0];
+    assert.ok(btn && !btn.props.disabled, "审批按钮应可点");
+    // user 来源的 server 不受审批约束，不该出现审批控件。
+    const tavilyRow = byClassAll(detailMcp, "wc-row").find((n) => textOf(n).includes("tavily"));
+    assert.ok(tavilyRow, "MCP 列表缺少 tavily");
+    assert.equal(byClassAll(tavilyRow, "wc-appr-dot").length, 0, "user 来源的 MCP 不该有审批控件");
+    // 点审批按钮会真的写盘（这里借 bridge 跑子进程）。
+    btn.props.onClick();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      centerTree = R.renderKeep(Center, {});
+      if (byClassAll(byClassAll(centerTree, "wc-detail")[0], "wc-appr-rejected").length > 0) break;
+    }
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(localPath, "utf8")).disabledMcpjsonServers,
+      ["proj-one"],
+      "点审批按钮应把拒绝写进项目配置",
+    );
+    // 写回批准，恢复 UI 段开始时的状态，后面展开链路的断言才不受影响。
+    run(["set", ws, "mcpApproval", "proj-one", "approved"]);
+    centerTree = R.renderKeep(Center, {});
+    byClassAll(centerTree, "wc-nav-item")[skillIdx].props.onClick();
+    centerTree = R.renderKeep(Center, {});
+  }
   // 点行展开生效链路：全局 → 团队配置 → 本地 → 最终
   const mains = byClassAll(centerTree, "wc-main");
   assert.ok(mains.length > 0, "中央页签没有渲染出资源行");

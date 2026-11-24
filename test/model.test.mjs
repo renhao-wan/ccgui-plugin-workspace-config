@@ -7,6 +7,8 @@ import {
   setMcpState,
   getSkillState,
   setSkillState,
+  getMcpApproval,
+  setMcpApproval,
   overrideCount,
   effectiveState,
   prune,
@@ -72,10 +74,76 @@ test("skill 三态：on 写字符串 on，off 写 off，inherit 删除", () => {
   assert.deepEqual(setSkillState(off, "deploy", "inherit"), {});
 });
 
-test("skill 的 name-only / user-invocable-only 视为非禁用", () => {
+test("skill 四态原样读出，不被折成 on", () => {
   const project = { skillOverrides: { a: "name-only", b: "user-invocable-only" } };
-  assert.equal(getSkillState(project, "a"), "on");
-  assert.equal(getSkillState(project, "b"), "on");
+  assert.equal(getSkillState(project, "a"), "name-only");
+  assert.equal(getSkillState(project, "b"), "user-invocable-only");
+});
+
+test("skill 四态写入往返，互不覆盖", () => {
+  let project = {};
+  for (const state of ["on", "name-only", "user-invocable-only", "off"]) {
+    project = setSkillState(project, "s", state);
+    assert.equal(project.skillOverrides.s, state);
+    assert.equal(getSkillState(project, "s"), state);
+  }
+  // 点「启用」不再把 name-only 改写掉——这是此前的真实缺陷。
+  const named = setSkillState({}, "s", "name-only");
+  assert.equal(getSkillState(setSkillState(named, "s", "on"), "s"), "on");
+  assert.deepEqual(setSkillState({ skillOverrides: { s: "name-only" } }, "s", "inherit"), {});
+});
+
+test("skill 未知取值读成 unknown，且不能被当作可写状态", () => {
+  assert.equal(getSkillState({ skillOverrides: { s: "bogus" } }, "s"), "unknown");
+  assert.throws(() => setSkillState({}, "s", "unknown"), /不支持的状态/);
+  assert.throws(() => setSkillState({}, "s", "bogus"), /不支持的状态/);
+});
+
+test("mcp 审批：拒绝 > 逐个批准 > 全部批准 > 待审批", () => {
+  assert.equal(getMcpApproval({}, "x"), "pending");
+  assert.equal(getMcpApproval({ enableAllProjectMcpServers: true }, "x"), "approved");
+  assert.equal(getMcpApproval({ enabledMcpjsonServers: ["x"] }, "x"), "approved");
+  assert.equal(getMcpApproval({ disabledMcpjsonServers: ["x"] }, "x"), "rejected");
+  // 同一名字同时出现在两个名单里，拒绝优先。
+  assert.equal(getMcpApproval({ enabledMcpjsonServers: ["x"], disabledMcpjsonServers: ["x"] }, "x"), "rejected");
+  // 名单里没有的名字不受别的名字影响。
+  assert.equal(getMcpApproval({ enabledMcpjsonServers: ["y"] }, "x"), "pending");
+});
+
+test("mcp 审批写入：互斥且清理空数组", () => {
+  let project = {};
+  project = setMcpApproval(project, "x", "approved").settings;
+  assert.deepEqual(project.enabledMcpjsonServers, ["x"]);
+
+  project = setMcpApproval(project, "x", "rejected").settings;
+  assert.deepEqual(project.disabledMcpjsonServers, ["x"]);
+  assert.equal("enabledMcpjsonServers" in project, false);
+
+  project = setMcpApproval(project, "x", "pending").settings;
+  assert.deepEqual(project, {});
+
+  // 只动目标名字。
+  const mixed = setMcpApproval({ enabledMcpjsonServers: ["y"] }, "x", "rejected").settings;
+  assert.deepEqual(mixed.enabledMcpjsonServers, ["y"]);
+  assert.deepEqual(mixed.disabledMcpjsonServers, ["x"]);
+});
+
+test("mcp 审批：总开关开着时 pending 无法实现，如实回报", () => {
+  const res = setMcpApproval({ enableAllProjectMcpServers: true }, "x", "pending");
+  assert.equal(res.effective, "approved");
+  assert.equal(res.settings.enableAllProjectMcpServers, true);
+  // 总开关本身不被这条写入改动。
+  const ok = setMcpApproval({ enableAllProjectMcpServers: true }, "x", "rejected");
+  assert.equal(ok.effective, "rejected");
+  assert.equal(ok.settings.enableAllProjectMcpServers, true);
+  assert.deepEqual(ok.settings.disabledMcpjsonServers, ["x"]);
+  assert.throws(() => setMcpApproval({}, "x", "inherit"), /不支持的状态/);
+});
+
+test("overrideCount 计入审批条目与总开关", () => {
+  assert.equal(overrideCount({ enabledMcpjsonServers: ["a", "b"] }), 2);
+  assert.equal(overrideCount({ disabledMcpjsonServers: ["a"] }), 1);
+  assert.equal(overrideCount({ enableAllProjectMcpServers: true }), 1);
 });
 
 test("未管理的键原样保留", () => {
@@ -85,7 +153,7 @@ test("未管理的键原样保留", () => {
   assert.deepEqual(next.env, project.env);
 });
 
-test("overrideCount 只数启用的三类键", () => {
+test("overrideCount 数插件/禁用 MCP/技能/审批四类键", () => {
   const project = {
     enabledPlugins: { "a@m": false },
     deniedMcpServers: [{ serverName: "tavily" }, { serverUrl: "https://x" }],
