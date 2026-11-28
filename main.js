@@ -30,6 +30,8 @@ const FEEDBACK_REPO = "renhao-wan/ccgui-plugin-workspace-config";
 const FEEDBACK_PLUGIN_NAME = "工作区配置";
 const FEEDBACK_TIMEOUT_MS = 15000;
 
+// ---- 以下由 src/lib/*.mjs 与共用库 内联生成 ----
+// ---- src/lib/model.mjs ----
 /* 三态模型：项目级配置只表达「跟随全局 / 启用 / 禁用」，不碰全局文件。
  * 纯函数，浏览器与 node 都能跑；写操作一律返回新对象。 */
 
@@ -1403,10 +1405,286 @@ function renderMarkdown(h, text, opts) {
   });
 }
 
+// ---- ccgui-plugin-shared/dropdown.mjs ----
+/**
+ * 自绘下拉菜单（不用原生 <select>）。
+ *
+ * 为什么必须自绘：Windows 下 <select> 会渲染成系统控件，和宿主完全不是一套外观。
+ *
+ * 为什么放进共用包：trending / worklog / leetcode 各写了一份，129 / 156 / 129 行，
+ * 行为一致但细节已经漂开——trending 有 ✓ 勾选和 hover 同步焦点，worklog 用的是
+ * 两套 keydown handler（菜单里方向键会失效），leetcode 用文本 "▾" 而不是 CSS 箭头。
+ * 每写一个新插件就重抄一遍，所以「下拉还有问题」反复出现。
+ *
+ * 库只产出**结构和类名**，不产出 CSS：类名固定为 `${prefix}-dd-*`，
+ * 配色由各插件自己的 token 决定（自建 token 与直接用宿主 token 两条路线并存，不强行统一）。
+ * 类名清单见 DROPDOWN_CLASS_SUFFIXES，validate-core 据此检查插件有没有把 CSS 写全。
+ */
+
+/** 下拉会产出的全部类名后缀。改这里必须同步改三个插件的 CSS。 */
+const DROPDOWN_CLASS_SUFFIXES = Object.freeze([
+  "trigger",
+  "value",
+  "caret",
+  "scrim",
+  "menu",
+  "group",
+  "item",
+  "label",
+  "check",
+  "empty",
+]);
+
+/**
+ * 浮层开合与方向。
+ *
+ * 向上弹的判断放在打开前做一次：菜单开着时再测，会把菜单自身的高度算进去。
+ */
+function useDdPopover(R) {
+  const openState = R.useState(false);
+  const upState = R.useState(false);
+  const triggerRef = R.useRef(null);
+
+  /** 打开前估一下菜单高度：下方不够且上方更宽裕时向上弹，免得被视口裁掉。 */
+  const openPopover = (estHeight) => {
+    const el = triggerRef.current;
+    let shouldUp = false;
+    if (el && typeof el.getBoundingClientRect === "function" && typeof window !== "undefined") {
+      const rect = el.getBoundingClientRect();
+      const below = (window.innerHeight || 800) - rect.bottom;
+      shouldUp = below < estHeight + 12 && rect.top > below;
+    }
+    upState[1](shouldUp);
+    openState[1](true);
+  };
+
+  return {
+    open: openState[0],
+    setOpen: openState[1],
+    up: upState[0],
+    triggerRef,
+    openPopover,
+  };
+}
+
+/**
+ * 造一个 Dropdown 组件。
+ *
+ * `getR` 是**取 React 的函数**而不是 React 本身：插件的 `appCtx` 要等 activate
+ * 才赋值，顶层写 `createDropdown(appCtx.react, ...)` 拿到的是 null。
+ *
+ * 选项形状：`{ value, label, disabled?, title?, group? }`
+ *   - `disabled` 可以是布尔值，也可以是 `isDisabled(item)` 回调——语义一样，
+ *     回调那种是给「禁用条件依赖选中值或外部状态」的调用方用的。
+ *   - `title` 会落到选项的 title 属性上，用于「仅名称 / 仅手动」这类
+ *     不看说明就看不懂的取值。
+ *   - `group` 相同的连续选项前面会插一条分组标题。
+ *
+ * @param {() => object} getR  返回 { useState, useRef, useEffect, createElement }
+ * @param {{ prefix: string }} opts  prefix 决定类名，如 "gt" → gt-dd-trigger
+ */
+function createDropdown(getR, opts) {
+  const prefix = (opts && opts.prefix) || "dd";
+  const base = prefix + "-dd";
+  const cls = (name) => base + "-" + name;
+
+  return function Dropdown(props) {
+    const R = getR();
+    const h = R.createElement;
+    const { open, setOpen, up, triggerRef, openPopover } = useDdPopover(R);
+    const focusState = R.useState(-1);
+    const focusIdx = focusState[0];
+    const setFocusIdx = focusState[1];
+    const itemRefs = R.useRef([]);
+
+    const items = Array.isArray(props.items) ? props.items : [];
+    const value = props.value == null ? "" : String(props.value);
+    const selectedIdx = items.findIndex((it) => String(it.value) === value);
+    const selected = selectedIdx >= 0 ? items[selectedIdx] : null;
+    const placeholder = props.placeholder || "请选择";
+
+    /**
+     * 统一的禁用判断。
+     *
+     * 组件里每个用到「这一项能不能选」的地方都走它，不要有的地方读
+     * `item.disabled`、有的地方调回调——两套判断迟早分叉，表现是
+     * 「灰着但能点」或「能点但方向键跳过去了」。
+     */
+    const disabledOf = (item) => {
+      if (!item) return true;
+      if (typeof props.isDisabled === "function") return Boolean(props.isDisabled(item));
+      return Boolean(item.disabled);
+    };
+
+    R.useEffect(() => {
+      if (!open) return;
+      const el = itemRefs.current[focusIdx];
+      if (el && typeof el.focus === "function") el.focus();
+    }, [open, focusIdx]);
+
+    const openMenu = () => {
+      if (props.disabled || items.length === 0) return;
+      let i = selectedIdx;
+      if (i < 0) i = items.findIndex((it) => !disabledOf(it));
+      setFocusIdx(i < 0 ? 0 : i);
+      openPopover(Math.min(260, items.length * 32 + 8));
+    };
+
+    const choose = (item) => {
+      if (!item || disabledOf(item)) return;
+      setOpen(false);
+      if (String(item.value) !== value) props.onChange(item.value);
+    };
+
+    const move = (step) => {
+      if (!items.length) return;
+      let i = focusIdx;
+      for (let n = 0; n < items.length; n += 1) {
+        i = (i + step + items.length) % items.length;
+        if (!disabledOf(items[i])) break;
+      }
+      setFocusIdx(i);
+    };
+
+    /**
+     * 键盘处理挂在**容器**上，不是 trigger 上。
+     *
+     * 菜单一打开，useEffect 会把焦点移到 option 上（option 带 tabIndex=-1），
+     * 此后按键事件从 option 冒泡到容器。只挂在 trigger 上的话，打开之后方向键、
+     * Enter 确认、Esc 关闭全部失灵——只剩鼠标能用。
+     *
+     * 容器与 trigger 不能各挂一个：同一事件会冒泡两遍，Enter 会触发两次 onChange。
+     * 所以只有一个 handler，靠 ev.target 的 className 认来源。
+     */
+    const onKeyDown = (ev) => {
+      if (props.disabled) return;
+      // 按 className 认来源，不用 triggerRef.current：ref 在假宿主/替身里
+      // 未必被赋值，一旦为 null 判断就会恒假，空格键静默失效。
+      const t = ev && ev.target;
+      const onTrigger = Boolean(
+        t && typeof t.className === "string" && t.className.split(/\s+/).includes(cls("trigger")),
+      );
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+        ev.preventDefault();
+        if (!open) openMenu();
+        else move(ev.key === "ArrowDown" ? 1 : -1);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (open) choose(items[focusIdx]);
+        else openMenu();
+      } else if (ev.key === " ") {
+        // 空格只在 trigger 上当「打开」：菜单项里按空格同理会冒泡到这里，
+        // 但那是可滚动列表，别为了这个吃掉滚动键。
+        if (onTrigger) {
+          ev.preventDefault();
+          if (open) choose(items[focusIdx]);
+          else openMenu();
+        }
+      } else if (ev.key === "Escape" && open) {
+        ev.preventDefault();
+        setOpen(false);
+        // 焦点回到触发器：菜单关上后焦点若还留在已卸载的 option 上，
+        // 浏览器会把焦点丢回 body，接着按 Tab 就得从头走一遍整页。
+        const el = triggerRef.current;
+        if (el && typeof el.focus === "function") el.focus();
+      } else if (ev.key === "Tab" && open) {
+        // 焦点会离开这个组件；scrim 是 fixed 全屏，不关掉会留下一层看不见的
+        // 遮罩继续吞点击。
+        setOpen(false);
+      }
+    };
+
+    const noItems = items.length === 0;
+
+    return h(
+      "div",
+      {
+        // className 透传：调用方常靠它做布局（`.lc-settings .lc-dd { width:100% }`）。
+        className:
+          base +
+          (props.className ? " " + props.className : "") +
+          (open ? " is-open" : "") +
+          (up ? " is-up" : ""),
+        onKeyDown,
+      },
+      h(
+        "button",
+        {
+          type: "button",
+          className: cls("trigger"),
+          ref: triggerRef,
+          // 没有选项时也禁用：点开一个空菜单只会让人以为坏了。
+          disabled: props.disabled || noItems,
+          "aria-haspopup": "listbox",
+          "aria-expanded": open,
+          onClick: () => (open ? setOpen(false) : openMenu()),
+        },
+        h(
+          "span",
+          { className: cls("value") + (selected ? "" : " is-empty") },
+          selected ? selected.label : noItems ? props.emptyText || "没有可选项" : placeholder,
+        ),
+        h("span", { className: cls("caret"), "aria-hidden": "true" }),
+      ),
+      open ? h("div", { className: cls("scrim"), onClick: () => setOpen(false) }) : null,
+      open
+        ? h(
+            "div",
+            { className: cls("menu"), role: "listbox" },
+            items.length
+              ? items.reduce((rows, item, i) => {
+                  // 分组标题：只在组名变化时插一条，且不参与键盘焦点。
+                  // 不用「值相同的项必然相邻」这种假设——按出现顺序判断，
+                  // 调用方把同组项隔开就插两条标题，那是调用方的问题，不猜。
+                  const prevGroup = i > 0 ? items[i - 1].group : undefined;
+                  if (item.group && item.group !== prevGroup) {
+                    rows.push(
+                      h("div", { key: "g:" + item.group + ":" + i, className: cls("group") }, item.group),
+                    );
+                  }
+                  const dis = disabledOf(item);
+                  rows.push(
+                    h(
+                      "div",
+                      {
+                        // value 可能重复（不同分组的同名项），带上下标才唯一。
+                        key: String(item.value) + ":" + i,
+                        ref: (el) => {
+                          itemRefs.current[i] = el;
+                        },
+                        className:
+                          cls("item") +
+                          (i === focusIdx ? " is-active" : "") +
+                          (dis ? " is-disabled" : ""),
+                        role: "option",
+                        "aria-selected": String(item.value) === value,
+                        "aria-disabled": dis ? true : undefined,
+                        // 「仅名称 / 仅手动」这类取值，不看说明判断不了，
+                        // 悬停必须给出完整含义。
+                        title: item.title || undefined,
+                        tabIndex: -1,
+                        onClick: () => choose(item),
+                        onMouseEnter: () => {
+                          if (!dis) setFocusIdx(i);
+                        },
+                      },
+                      h("span", { className: cls("label") }, item.label),
+                      h("span", { className: cls("check"), "aria-hidden": "true" }, "✓"),
+                    ),
+                  );
+                  return rows;
+                }, [])
+              : h("div", { className: cls("empty") }, props.emptyText || "没有可选项"),
+          )
+        : null,
+    );
+  };
+}
+
 
 const SCAN_SOURCE = "/* 三态模型：项目级配置只表达「跟随全局 / 启用 / 禁用」，不碰全局文件。\n * 纯函数，浏览器与 node 都能跑；写操作一律返回新对象。 */\n\nconst PROJECT_SETTINGS_REL = \".claude/settings.local.json\";\nconst SHARED_SETTINGS_REL = \".claude/settings.json\";\n\nconst TRI_STATES = [\"inherit\", \"on\", \"off\"];\n// MCP 只有 denylist 可写：项目级能禁用，不能解除全局的禁用。\nconst MCP_STATES = [\"inherit\", \"off\"];\n// 技能官方是四态（code.claude.com/docs/en/skills）：\n//   on                  名称和描述都给 Claude\n//   name-only           只给名称，省掉描述\n//   user-invocable-only 对 Claude 隐藏，只留 / 菜单手动调用\n//   off                 两边都隐藏\n// 后两者不是「禁用」，早先按 on 处理会在用户点「启用」时把原值改写掉。\nconst SKILL_VALUES = [\"on\", \"name-only\", \"user-invocable-only\", \"off\"];\nconst SKILL_STATES = [\"inherit\"].concat(SKILL_VALUES);\n\nconst has = (obj, key) =>\n  obj !== null && typeof obj === \"object\" && Object.prototype.hasOwnProperty.call(obj, key);\n\n/** settings 是 JSON 文档，深拷贝用 JSON 往返即可；不依赖 structuredClone。 */\nfunction cloneSettings(settings) {\n  return settings && typeof settings === \"object\" ? JSON.parse(JSON.stringify(settings)) : {};\n}\n\n/** 空键不落盘：面板把某栏全部改回「跟随全局」时，文件里不该留下空对象。 */\nfunction prune(settings) {\n  const next = cloneSettings(settings);\n  if (next.enabledPlugins && Object.keys(next.enabledPlugins).length === 0) delete next.enabledPlugins;\n  if (Array.isArray(next.deniedMcpServers) && next.deniedMcpServers.length === 0) delete next.deniedMcpServers;\n  if (next.skillOverrides && Object.keys(next.skillOverrides).length === 0) delete next.skillOverrides;\n  // 项目 .mcp.json 的逐个审批名单，Claude Code 也写在这份文件里。\n  if (Array.isArray(next.enabledMcpjsonServers) && next.enabledMcpjsonServers.length === 0) delete next.enabledMcpjsonServers;\n  if (Array.isArray(next.disabledMcpjsonServers) && next.disabledMcpjsonServers.length === 0) delete next.disabledMcpjsonServers;\n  return next;\n}\n\nfunction assertState(state, allowed, kind) {\n  if (!allowed.includes(state)) {\n    throw new Error(`${kind} 不支持的状态：${state}（允许 ${allowed.join(\" / \")}）`);\n  }\n}\n\n/* ------------------------------------------------------------ plugin */\n\nfunction getPluginState(project, id) {\n  if (!has(project.enabledPlugins, id)) return \"inherit\";\n  return project.enabledPlugins[id] === false ? \"off\" : \"on\";\n}\n\nfunction setPluginState(project, id, state) {\n  assertState(state, TRI_STATES, \"plugin\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.enabledPlugins, id)) delete next.enabledPlugins[id];\n  } else {\n    next.enabledPlugins = { ...(next.enabledPlugins || {}), [id]: state === \"on\" };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ mcp */\n\nfunction getMcpState(project, serverName) {\n  const list = project.deniedMcpServers;\n  if (!Array.isArray(list)) return \"inherit\";\n  return list.some((entry) => entry && entry.serverName === serverName) ? \"off\" : \"inherit\";\n}\n\n/** 只增删 serverName 条目；serverCommand / serverUrl 条目原样保留。 */\nfunction setMcpState(project, serverName, state) {\n  if (state === \"on\") {\n    throw new Error(\"MCP 项目级无法显式启用：全局已禁用时不受项目控制，请改用 inherit\");\n  }\n  assertState(state, MCP_STATES, \"mcp\");\n  const next = cloneSettings(project);\n  const list = Array.isArray(next.deniedMcpServers) ? next.deniedMcpServers.slice() : [];\n  const filtered = list.filter((entry) => !(entry && entry.serverName === serverName));\n  if (state === \"off\") filtered.push({ serverName });\n  next.deniedMcpServers = filtered;\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ skill */\n\nfunction getSkillState(project, name) {\n  if (!has(project.skillOverrides, name)) return \"inherit\";\n  const value = project.skillOverrides[name];\n  // 未知取值原样返回，交给界面显示成「其它」并只读；猜成 on 会误导，\n  // 而且后续任何一次写入都会把它覆盖掉。\n  return SKILL_VALUES.includes(value) ? value : \"unknown\";\n}\n\nfunction setSkillState(project, name, state) {\n  // 只拒绝面板自己不认识的值；unknown 是读取态，不是可写状态。\n  assertState(state, SKILL_STATES, \"skill\");\n  const next = cloneSettings(project);\n  if (state === \"inherit\") {\n    if (has(next.skillOverrides, name)) delete next.skillOverrides[name];\n  } else {\n    next.skillOverrides = { ...(next.skillOverrides || {}), [name]: state };\n  }\n  return prune(next);\n}\n\n/* ------------------------------------------------------------ 项目 .mcp.json 审批 */\n\n// Claude Code 把项目 .mcp.json 里 server 的审批结果写在 .claude/settings.local.json\n// （和本插件同一个文件），三个键：\n//   enableAllProjectMcpServers: true   全部批准，不再弹窗\n//   enabledMcpjsonServers: [name…]     逐个批准\n//   disabledMcpjsonServers: [name…]    逐个拒绝；优先级高于前两者\n// 未出现在任何名单里且没开「全部批准」时，server 是待审批状态：不连、界面上不该显示成生效。\n//\n// 还有一层别处管不到：工作区没被信任时（~/.claude.json 的 projects[ws]\n// .hasTrustDialogAccepted 不为 true），**批准一律不生效**，仍然停在待审批；\n// 拒绝不受影响。这条是 2026-11-24 用 claude 2.1.319 实测确认的。\n\nfunction getMcpApproval(project, serverName) {\n  const disabled = Array.isArray(project.disabledMcpjsonServers) ? project.disabledMcpjsonServers : [];\n  if (disabled.includes(serverName)) return \"rejected\";\n  const enabled = Array.isArray(project.enabledMcpjsonServers) ? project.enabledMcpjsonServers : [];\n  if (enabled.includes(serverName)) return \"approved\";\n  if (project.enableAllProjectMcpServers === true) return \"approved\";\n  return \"pending\";\n}\n\n/**\n * 只改这一个 server 的审批结果，不动「全部批准」这个总开关。\n *\n * 传 \"pending\" 表示从两个名单里都移除。注意：如果 enableAllProjectMcpServers\n * 已是 true，移除后仍然是 approved——这是 Claude Code 的语义，不是这里能改的，\n * 所以界面要据此提示。返回里带上生效结果，调用方可直接显示。\n */\nfunction setMcpApproval(project, serverName, state) {\n  assertState(state, [\"approved\", \"rejected\", \"pending\"], \"mcp 审批\");\n  const next = cloneSettings(project);\n  const pick = (list) => (Array.isArray(list) ? list.filter((n) => n !== serverName) : []);\n  const enabled = pick(next.enabledMcpjsonServers);\n  const disabled = pick(next.disabledMcpjsonServers);\n  if (state === \"approved\") enabled.push(serverName);\n  else if (state === \"rejected\") disabled.push(serverName);\n  if (enabled.length) next.enabledMcpjsonServers = enabled;\n  else delete next.enabledMcpjsonServers;\n  if (disabled.length) next.disabledMcpjsonServers = disabled;\n  else delete next.disabledMcpjsonServers;\n  // 总开关开着时「待审批」无法靠单个名单实现，如实回报，让界面说明原因。\n  const blockedByAll = state === \"pending\" && next.enableAllProjectMcpServers === true;\n  return { settings: prune(next), effective: blockedByAll ? \"approved\" : state };\n}\n\n/**\n * server 到底连没连上，以及卡在哪一层。返回 null 表示确实会连接。\n *\n * 五道闸按 Claude Code 的判定顺序排列（2026-11-24 用 2.1.319 实测）：\n *   global-denied   ~/.claude/settings.json 的 deniedMcpServers（对象格式才生效）\n *   project-denied  本项目 deniedMcpServers\n *   rejected        项目 .mcp.json 的拒绝，任何情况下都生效\n *   pending         还没批准\n *   untrusted       批准了，但工作区没被信任 —— 批准不生效，仍停在待审批\n *   runtime-disabled /mcp 里手动关掉的（~/.claude.json 项目条目的 disabledMcpServers）\n */\nfunction mcpBlockReason({ globalDenied, projectDenied, approval, trusted, runtimeDisabled }) {\n  if (globalDenied) return \"global-denied\";\n  if (projectDenied) return \"project-denied\";\n  if (approval === \"rejected\") return \"rejected\";\n  if (approval === \"pending\") return \"pending\";\n  // 未信任时 Claude Code 连「已批准」都不认，这是最容易漏的一层：\n  // 面板写批准、文件里也确实写着批准，实际却还是待审批。\n  // 只挡批准这一侧——没有审批可挡的 server（user/local/plugin 来源）不受影响，\n  // 否则 !undefined 会把它们全部误判成未信任。\n  if (approval === \"approved\" && !trusted) return \"untrusted\";\n  // /mcp 的手动开关（disabledMcpServers）同样录在 ~/.claude.json 的项目条目里，\n  // 未信任时 Claude Code 根本不看它，这里也就不能据此说「被关了」。\n  if (runtimeDisabled && trusted) return \"runtime-disabled\";\n  return null;\n}\n\n/* ------------------------------------------------------------ 展示用 */\n\n/** 项目覆盖了多少项；panel tab 的徽标数字。 */\nfunction overrideCount(project) {\n  const plugins = project.enabledPlugins ? Object.keys(project.enabledPlugins).length : 0;\n  const mcp = Array.isArray(project.deniedMcpServers)\n    ? project.deniedMcpServers.filter((entry) => entry && entry.serverName).length\n    : 0;\n  const skills = project.skillOverrides ? Object.keys(project.skillOverrides).length : 0;\n  const approvals = (Array.isArray(project.enabledMcpjsonServers) ? project.enabledMcpjsonServers.length : 0)\n    + (Array.isArray(project.disabledMcpjsonServers) ? project.disabledMcpjsonServers.length : 0)\n    + (project.enableAllProjectMcpServers === true ? 1 : 0);\n  return plugins + mcp + skills + approvals;\n}\n\n/** 项目态优先；inherit 时回落到全局态。 */\nfunction effectiveState(projectState, globalState) {\n  if (projectState && projectState !== \"inherit\") return projectState;\n  return globalState || \"unknown\";\n}\n\n/* 子进程：读写项目级 Claude Code 配置。\n *\n * 插件本体拿不到文件系统，只能把这份脚本落盘后经 exec:node 执行。\n * 构建时 scripts/build.mjs 会把 src/lib/model.mjs 的源码内联进来，\n * 所以这里唯一允许的兄弟 import 是 model；其余只能用 node 内置模块。\n *\n * 用法：\n *   node config-io.mjs scan <workspace>\n *   node config-io.mjs set  <workspace> <plugin|mcp|skill> <id> <inherit|on|off>\n *   node config-io.mjs probe <workspace> <serverName>   ← 会真的启动 server\n * 输出：单行 JSON，ok=false 时附带 error。\n */\n\nimport fs from \"node:fs\";\nimport os from \"node:os\";\nimport path from \"node:path\";\nimport { spawnSync } from \"node:child_process\";\n\nconst HOME = process.env.USERPROFILE || process.env.HOME || os.homedir();\n// 设了 CLAUDE_CONFIG_DIR 时，Claude Code 会把 settings.json、.claude.json、\n// plugins/、projects/ 全部搬进这个目录（官方文档：该页所有 ~/.claude 路径都改到这里）。\n// 硬编码 ~/.claude 会读到一片空，面板显示成「什么都没配」。实测 2.1.319 确实如此。\n// 注意 .claude.json 只在设了这个变量时才跟着走，默认仍在 HOME 根上。\nconst CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR\n  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)\n  : path.join(HOME, \".claude\");\nconst CLAUDE_DIR = CONFIG_DIR;\nconst CLAUDE_JSON = process.env.CLAUDE_CONFIG_DIR\n  ? path.join(CONFIG_DIR, \".claude.json\")\n  : path.join(HOME, \".claude.json\");\n\nfunction readJson(file) {\n  try {\n    let text = fs.readFileSync(file, \"utf8\");\n    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);\n    return JSON.parse(text);\n  } catch {\n    return null;\n  }\n}\n\n/**\n * 严格读取：把「文件不存在」和「存在但解析失败」分开。\n *\n * 写入前必须用这个。settings.local.json 里可能同时住着用户手写的 permissions、\n * hooks、env 等键；一旦解析失败就被当成空对象写回，等于整份配置被清空。\n * 这种情况要么报错停止，要么提示用户自己修，绝不能静默覆盖。\n */\nfunction readJsonStrict(file) {\n  let text;\n  try {\n    text = fs.readFileSync(file, \"utf8\");\n  } catch (err) {\n    if (err && err.code === \"ENOENT\") return { value: null, error: null };\n    return { value: null, error: \"读取失败：\" + ((err && err.message) || err) };\n  }\n  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);\n  // 空文件按「还没配置」处理，写回时自然变成一份新配置。\n  if (!text.trim()) return { value: null, error: null };\n  try {\n    const value = JSON.parse(text);\n    if (value === null || typeof value !== \"object\" || Array.isArray(value)) {\n      return { value: null, error: \"顶层不是 JSON 对象\" };\n    }\n    return { value, error: null };\n  } catch (err) {\n    return { value: null, error: String((err && err.message) || err) };\n  }\n}\n\n/** 写之前读；文件坏了就抛错，宁可这次操作失败也不吞掉用户的其它配置。 */\nfunction readForWrite(file) {\n  const { value, error } = readJsonStrict(file);\n  if (error) {\n    throw new Error(\"项目配置不是合法 JSON，为避免覆盖已停止写入：\" + file + \"（\" + error + \"）\");\n  }\n  return value || {};\n}\n\nfunction writeJsonAtomic(file, data) {\n  fs.mkdirSync(path.dirname(file), { recursive: true });\n  const tmp = file + \".tmp-\" + process.pid;\n  const body = JSON.stringify(data, null, 2) + \"\\n\";\n  fs.writeFileSync(tmp, body, \"utf8\");\n  fs.renameSync(tmp, file);\n}\n\nconst norm = (p) => String(p || \"\").replace(/\\\\/g, \"/\").replace(/\\/+$/, \"\").toLowerCase();\n\nfunction findProjectEntry(config, ws) {\n  const projects = (config && config.projects) || {};\n  const target = norm(ws);\n  const key = Object.keys(projects).find((k) => norm(k) === target);\n  return key ? projects[key] : null;\n}\n\nfunction listSkillDirs(root, source, plugin) {\n  const out = [];\n  let entries = [];\n  try {\n    entries = fs.readdirSync(root, { withFileTypes: true });\n  } catch {\n    return out;\n  }\n  for (const entry of entries) {\n    if (!entry.isDirectory()) continue;\n    const md = path.join(root, entry.name, \"SKILL.md\");\n    if (!fs.existsSync(md)) continue;\n    const meta = readSkillMeta(md);\n    // 技能名优先取 frontmatter 的 name，目录名只是回落（官方文档明确）。\n    // 用目录名当键时，一旦两者不一致，写进 skillOverrides 的键就对不上\n    // Claude Code 认的那个名字，开关看起来生效、实际什么也没改。\n    out.push({\n      name: meta.name || entry.name,\n      dirName: entry.name,\n      source,\n      plugin: plugin || null,\n      path: md,\n      description: meta.description,\n    });\n  }\n  return out;\n}\n\nfunction installedPlugins() {\n  const raw = readJson(path.join(CLAUDE_DIR, \"plugins\", \"installed_plugins.json\"));\n  const map = {};\n  const plugins = (raw && raw.plugins) || {};\n  for (const [id, list] of Object.entries(plugins)) {\n    if (!Array.isArray(list) || list.length === 0) continue;\n    const pick = list.find((e) => e && e.scope === \"user\") || list[0];\n    map[id] = {\n      installPath: pick && pick.installPath ? pick.installPath : \"\",\n      scopes: list.map((e) => e && e.scope).filter(Boolean),\n    };\n  }\n  return map;\n}\n\n/** 插件 .mcp.json 有两种写法：{ mcpServers: { name: cfg } } 和扁平的 { name: cfg }。 */\nfunction pluginServers(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return {};\n  const wrapped = cfg.mcpServers || cfg.servers;\n  if (wrapped && typeof wrapped === \"object\") return wrapped;\n  const out = {};\n  for (const [key, value] of Object.entries(cfg)) {\n    if (value && typeof value === \"object\"\n      && (\"command\" in value || \"url\" in value || \"type\" in value)) {\n      out[key] = value;\n    }\n  }\n  return out;\n}\n\n/** 插件描述：优先 .claude-plugin/plugin.json，其次根目录的 plugin.json / manifest.json。 */\nfunction pluginDescription(dir) {\n  if (!dir) return \"\";\n  for (const rel of [\".claude-plugin/plugin.json\", \"plugin.json\", \"manifest.json\"]) {\n    const cfg = readJson(path.join(dir, rel));\n    if (cfg && typeof cfg.description === \"string\" && cfg.description.trim()) {\n      return cfg.description.trim();\n    }\n  }\n  return \"\";\n}\n\n/** SKILL.md frontmatter 里的 name 与 description；只读前 50 行。 */\nfunction readSkillMeta(file) {\n  const meta = { name: \"\", description: \"\" };\n  try {\n    const lines = fs.readFileSync(file, \"utf8\").split(/\\r?\\n/).slice(0, 50);\n    if (!lines.length || lines[0].trim() !== \"---\") return meta;\n    let collecting = false;\n    const block = [];\n    for (let i = 1; i < lines.length; i++) {\n      const line = lines[i];\n      if (line.trim() === \"---\") break;\n      if (collecting) {\n        if (/^\\s+\\S/.test(line)) { block.push(line.trim()); continue; }\n        collecting = false;\n      }\n      const nameMatch = /^name:\\s*(.*)$/.exec(line);\n      if (nameMatch && !meta.name) {\n        meta.name = nameMatch[1].replace(/^[\"']|[\"']$/g, \"\").trim();\n        continue;\n      }\n      const match = /^description:\\s*(.*)$/.exec(line);\n      if (match) {\n        const value = match[1].trim();\n        if (/^[|>][-+]?$/.test(value)) { collecting = true; continue; }\n        meta.description = value.replace(/^[\"']|[\"']$/g, \"\").trim();\n      }\n    }\n    if (collecting || block.length) meta.description = meta.description || block.join(\" \").trim();\n    return meta;\n  } catch {\n    return meta;\n  }\n}\n\nfunction mcpDescription(cfg) {\n  if (!cfg || typeof cfg !== \"object\") return \"\";\n  if (typeof cfg.url === \"string\") return cfg.url;\n  if (typeof cfg.command === \"string\") {\n    const args = Array.isArray(cfg.args) ? \" \" + cfg.args.join(\" \") : \"\";\n    return (cfg.command + args).trim();\n  }\n  return \"\";\n}\n\nfunction scan(ws) {\n  const globalSettings = readJson(path.join(CLAUDE_DIR, \"settings.json\")) || {};\n  const globalConfig = readJson(CLAUDE_JSON) || {};\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const sharedPath = path.join(ws, SHARED_SETTINGS_REL);\n  // 坏掉的文件不能被当成「没有配置」：那样界面会显示成全部跟随全局，\n  // 用户再点一下就覆盖掉了。这里如实读，坏的单独报出来。\n  const localRead = readJsonStrict(localPath);\n  const local = localRead.value || {};\n  const shared = readJson(sharedPath) || {};\n\n  // 项目层：local 压过 shared；面板只写 local。\n  const projectLayer = Object.assign({}, shared, local);\n  for (const key of [\"enabledPlugins\", \"skillOverrides\"]) {\n    if (shared[key] || local[key]) {\n      projectLayer[key] = Object.assign({}, shared[key] || {}, local[key] || {});\n    }\n  }\n  if (Array.isArray(shared.deniedMcpServers) || Array.isArray(local.deniedMcpServers)) {\n    projectLayer.deniedMcpServers = [\n      ...(Array.isArray(shared.deniedMcpServers) ? shared.deniedMcpServers : []),\n      ...(Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []),\n    ];\n  }\n\n  /* ---------------- plugins ---------------- */\n\n  const installed = installedPlugins();\n  const pluginIds = new Set(Object.keys(globalSettings.enabledPlugins || {}));\n  for (const id of Object.keys(installed)) pluginIds.add(id);\n\n  const plugins = [];\n  for (const id of [...pluginIds].sort()) {\n    const at = id.lastIndexOf(\"@\");\n    const name = at > 0 ? id.slice(0, at) : id;\n    const marketplace = at > 0 ? id.slice(at + 1) : \"\";\n    const enabled = globalSettings.enabledPlugins && globalSettings.enabledPlugins[id];\n    const globalState = enabled === false ? \"off\" : enabled === true ? \"on\" : \"unknown\";\n    const projectState = getPluginState(projectLayer, id);\n    plugins.push({\n      kind: \"plugin\",\n      id,\n      name,\n      marketplace,\n      installed: Boolean(installed[id]),\n      installPath: installed[id] ? installed[id].installPath : \"\",\n      description: installed[id] ? pluginDescription(installed[id].installPath) : \"\",\n      globalState,\n      projectState,\n      // 面板只能写 local；shared 是被仓库共享的团队配置，单独列出以便界面说明「跟随」会落到哪一层。\n      localState: getPluginState(local, id),\n      sharedState: getPluginState(shared, id),\n      effectiveState: effectiveState(projectState, globalState),\n    });\n  }\n\n  /* ---------------- mcp ---------------- */\n\n  const userMcp = globalConfig.mcpServers || {};\n  const globalConfigProject = findProjectEntry(globalConfig, ws) || {};\n  const localMcp = globalConfigProject.mcpServers || {};\n  const projectMcp = (readJson(path.join(ws, \".mcp.json\")) || {}).mcpServers || {};\n\n  // 插件自带的 MCP：plugin 包里的 .mcp.json，同样能被 deniedMcpServers 拦住。\n  const pluginMcp = {};\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const cfg = readJson(path.join(info.installPath, \".mcp.json\"));\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    for (const [name, value] of Object.entries(pluginServers(cfg))) {\n      if (!(name in pluginMcp)) pluginMcp[name] = { plugin: pluginName, config: value };\n    }\n  }\n\n  const mcpNames = new Set([\n    ...Object.keys(userMcp),\n    ...Object.keys(localMcp),\n    ...Object.keys(projectMcp),\n    ...Object.keys(pluginMcp),\n  ]);\n\n  const globalDenied = Array.isArray(globalSettings.deniedMcpServers)\n    ? globalSettings.deniedMcpServers\n    : [];\n\n  // 项目 .mcp.json 的审批结果同样写在 settings.local.json；团队层与全局层也可能\n  // 设过。布尔开关按 local > shared > 全局 取值，两个名单取并集——拒绝优先，\n  // 所以并集不会把某一层的拒绝「合并掉」。\n  const approvalLayer = (() => {\n    const out = {};\n    for (const layer of [globalSettings, shared, local]) {\n      if (layer.enableAllProjectMcpServers !== undefined) {\n        out.enableAllProjectMcpServers = layer.enableAllProjectMcpServers;\n      }\n      for (const key of [\"enabledMcpjsonServers\", \"disabledMcpjsonServers\"]) {\n        if (Array.isArray(layer[key])) {\n          out[key] = [...new Set([...(out[key] || []), ...layer[key]])];\n        }\n      }\n    }\n    return out;\n  })();\n\n  // 工作区信任与 /mcp 的手动开关都住在 ~/.claude.json 的项目条目里，\n  // 不在任何 settings 文件，所以前面几条读取路径都碰不到。\n  // hasTrustDialogAccepted 只有显式 true 才算信任；未设置、false 都按未信任处理。\n  const workspaceTrusted = globalConfigProject.hasTrustDialogAccepted === true;\n  // /mcp 里关掉的 server，键名是 disabledMcpServers（没有 Mcpjson）。\n  const runtimeDisabledInProject = Array.isArray(globalConfigProject.disabledMcpServers)\n    ? globalConfigProject.disabledMcpServers\n    : [];\n\n  const mcp = [...mcpNames].sort().map((name) => {\n    const scopes = [];\n    if (localMcp[name]) scopes.push(\"local\");\n    if (projectMcp[name]) scopes.push(\"project\");\n    if (userMcp[name]) scopes.push(\"user\");\n    if (pluginMcp[name]) scopes.push(\"plugin\");\n    const deniedGlobally = globalDenied.some((e) => e && e.serverName === name);\n    // local > project > user > plugin 是 Claude Code 的生效顺序\n    const scope = scopes[0] || \"user\";\n    const pluginEntry = pluginMcp[name];\n    const config = localMcp[name] || projectMcp[name] || userMcp[name]\n      || (pluginEntry && pluginEntry.config) || null;\n    const projectState = getMcpState(projectLayer, name);\n    const globalState = deniedGlobally ? \"off\" : \"on\";\n    // 审批只对来自项目 .mcp.json 的定义有意义；user/local/plugin 来源不弹这个窗。\n    const approval = projectMcp[name] ? getMcpApproval(approvalLayer, name) : null;\n    const projectDenied = getMcpState(projectLayer, name) === \"off\";\n    const blocked = projectMcp[name]\n      ? mcpBlockReason({\n          globalDenied: deniedGlobally,\n          projectDenied,\n          approval,\n          trusted: workspaceTrusted,\n          runtimeDisabled: runtimeDisabledInProject.includes(name),\n        })\n      : mcpBlockReason({ globalDenied: deniedGlobally, projectDenied, approval: null });\n    return {\n      kind: \"mcp\",\n      id: name,\n      name,\n      scope,\n      scopes,\n      plugin: pluginEntry ? pluginEntry.plugin : null,\n      description: mcpDescription(config),\n      globalState,\n      projectState,\n      localState: getMcpState(local, name),\n      sharedState: getMcpState(shared, name),\n      canEnable: !deniedGlobally,\n      projectDefined: Boolean(projectMcp[name]),\n      approval,\n      allApproved: approvalLayer.enableAllProjectMcpServers === true,\n      // null = 会连上；其余是卡住的原因，界面要照实说出来。\n      blocked,\n      effectiveState: blocked ? \"off\" : effectiveState(projectState, \"on\"),\n    };\n  });\n\n  /* ---------------- skills ---------------- */\n\n  const skills = [];\n  skills.push(...listSkillDirs(path.join(CLAUDE_DIR, \"skills\"), \"personal\"));\n  skills.push(...listSkillDirs(path.join(ws, \".claude\", \"skills\"), \"project\"));\n\n  for (const [id, info] of Object.entries(installed)) {\n    if (!info.installPath) continue;\n    const at = id.lastIndexOf(\"@\");\n    const pluginName = at > 0 ? id.slice(0, at) : id;\n    skills.push(...listSkillDirs(path.join(info.installPath, \"skills\"), \"plugin\", pluginName));\n  }\n\n  const globalOverrides = globalSettings.skillOverrides || {};\n  const seen = new Map();\n  const skillRows = skills.map((s) => {\n    // 全局层同样是四态，压成 on/off 会让「仅名称」看起来像完整启用。\n    const globalState = Object.prototype.hasOwnProperty.call(globalOverrides, s.name)\n      ? getSkillState(globalSettings, s.name)\n      : \"on\";\n    const projectState = getSkillState(projectLayer, s.name);\n    const row = {\n      kind: \"skill\",\n      id: s.name,\n      name: s.name,\n      // 目录名与 frontmatter 不一致时，界面上要能看出文件在哪。\n      dirName: s.dirName,\n      source: s.source,\n      plugin: s.plugin,\n      description: s.description || \"\",\n      globalState,\n      projectState,\n      localState: getSkillState(local, s.name),\n      sharedState: getSkillState(shared, s.name),\n      effectiveState: effectiveState(projectState, globalState),\n      controllable: s.source !== \"plugin\",\n    };\n    const key = s.name;\n    if (!seen.has(key)) seen.set(key, []);\n    seen.get(key).push(s.source);\n    return row;\n  });\n\n  for (const row of skillRows) {\n    const sources = seen.get(row.name) || [];\n    row.shadowed = row.source === \"personal\" && sources.includes(\"project\");\n    if (row.controllable && sources.length > 1) {\n      row.effectiveSource = sources.includes(\"personal\") ? \"personal\" : \"project\";\n    } else if (!row.controllable) {\n      row.effectiveSource = \"plugin\";\n    } else {\n      row.effectiveSource = row.source;\n    }\n  }\n\n  /* ---------------- diagnostics ---------------- */\n\n  // 面板只列「当前存在的资源」，所以 local 里指向已消失资源的键会完全没有入口。\n  // 这里把它们找出来：stale 项可以一键清掉，其余只提示原因。\n  const diagnostics = [];\n  const seenDiag = new Set();\n  // 同名技能可能被多个来源列出（个人版与项目版、或多个插件共用 installPath），\n  // 诊断只该报一次。\n  const diag = (level, kind, id, name, message, fixable) => {\n    const key = level + \":\" + kind + \":\" + id;\n    if (seenDiag.has(key)) return;\n    seenDiag.add(key);\n    diagnostics.push({ level, kind, id, name, message, fixable: Boolean(fixable) });\n  };\n\n  // 配置文件坏了必须最优先报：这时列表里的一切都是「读不到」而不是「没设置」，\n  // 而且任何一次写入都会被拒绝（见 readForWrite）。\n  if (localRead.error) {\n    diag(\"error\", \"file\", PROJECT_SETTINGS_REL, \"settings.local.json\",\n      \"项目配置不是合法 JSON（\" + localRead.error + \"），面板不会写入，请先手动修复\", false);\n  }\n\n  const knownPlugins = new Set(plugins.map((p) => p.id));\n  for (const id of Object.keys(local.enabledPlugins || {})) {\n    if (!knownPlugins.has(id)) diag(\"stale\", \"plugin\", id, id, \"插件已不存在，本地仍保留开关\", true);\n  }\n  for (const p of plugins) {\n    if (!p.installed && p.globalState === \"on\") {\n      diag(\"warn\", \"plugin\", p.id, p.name, \"全局启用但本机未安装\", false);\n    }\n  }\n\n  const knownSkills = new Set(skillRows.map((r) => r.name));\n  for (const name of Object.keys(local.skillOverrides || {})) {\n    // 旧版本用目录名当键，遇到 frontmatter 改了 name 的技能就会留下一条\n    // Claude Code 根本不认的键；按残留报出来，用户才知道该清掉。\n    if (!knownSkills.has(name)) diag(\"stale\", \"skill\", name, name, \"技能已不存在，本地仍保留开关\", true);\n  }\n  for (const r of skillRows) {\n    const localTouched = Object.prototype.hasOwnProperty.call(local.skillOverrides || {}, r.name);\n    if (r.shadowed) diag(\"info\", \"skill\", r.id, r.name, \"项目版本被同名个人技能遮蔽\", false);\n    if (r.controllable === false && localTouched) {\n      diag(\"warn\", \"skill\", r.id, r.name, \"插件提供的技能不受本地开关控制\", false);\n    }\n  }\n\n  const knownMcp = new Set(mcpNames);\n  for (const entry of Array.isArray(local.deniedMcpServers) ? local.deniedMcpServers : []) {\n    if (entry && entry.serverName && !knownMcp.has(entry.serverName)) {\n      diag(\"stale\", \"mcp\", entry.serverName, entry.serverName, \"MCP 已不存在，本地仍保留禁用\", true);\n    }\n  }\n  for (const row of mcp) {\n    if (row.sharedState === \"off\") {\n      diag(\"warn\", \"mcp\", row.id, row.name, \"团队配置已禁用，本地无法解除\", false);\n    }\n    // 待审批是「看起来配了、其实没连」，比报错更难发现，必须单独提示。\n    if (row.approval === \"pending\") {\n      diag(\"warn\", \"mcp\", row.id, row.name, \"项目 .mcp.json 里定义但尚未批准，本次会话不会连接\", false);\n    }\n    // 批准了却没被信任，是比待审批更隐蔽的一种「假绿点」：文件里明明写着批准。\n    if (row.blocked === \"untrusted\") {\n      diag(\"warn\", \"mcp\", row.id, row.name,\n        \"已批准，但工作区尚未被信任，Claude Code 仍按待审批处理；在终端里运行一次 claude 并接受信任对话框\", false);\n    }\n    if (row.blocked === \"runtime-disabled\") {\n      diag(\"warn\", \"mcp\", row.id, row.name, \"在 /mcp 里被手动关闭了；要恢复请在 /mcp 里重新启用\", false);\n    }\n  }\n  if (!workspaceTrusted && mcp.some((r) => r.projectDefined)) {\n    // 一个工作区里可能有好几个 .mcp.json server，逐条说会刷屏，这里汇总一条。\n    diag(\"info\", \"workspace\", ws, \"工作区\",\n      \"本项目尚未被信任：.mcp.json 里 server 的批准不会生效（拒绝仍然生效）\", false);\n  }\n  // 审批名单和 deniedMcpServers 一样会留残留：.mcp.json 里删掉的 server\n  // 仍占着批准/拒绝名单，列表里看不到，重装同名 server 时会突然被自动拒绝。\n  const projectMcpNames = new Set(Object.keys(projectMcp));\n  for (const key of [\"enabledMcpjsonServers\", \"disabledMcpjsonServers\"]) {\n    for (const name of Array.isArray(local[key]) ? local[key] : []) {\n      if (!projectMcpNames.has(name)) {\n        diag(\"stale\", \"mcpApproval\", name, name,\n          \"项目 .mcp.json 里已没有这个 server，本地仍保留\" + (key === \"enabledMcpjsonServers\" ? \"批准\" : \"拒绝\") + \"记录\",\n          true);\n      }\n    }\n  }\n\n  return {\n    ok: true,\n    workspace: ws,\n    files: { local: localPath, shared: sharedPath },\n    pluginCount: plugins.length,\n    plugins,\n    mcp,\n    skills: skillRows,\n    diagnostics,\n    // 界面要拿它解释「为什么批准了还没连上」。\n    workspaceTrusted,\n  };\n}\n\n/* ---------------- 记忆文件（只读） ---------------- */\n\n// Claude Code 按工作区路径生成会话目录名：非字母数字一律变 -。\n// D:\\projects\\notes\\cc-wrapped → D--projects-notes-cc-wrapped\nfunction memorySlug(ws) {\n  return path.resolve(ws).replace(/[^a-zA-Z0-9]/g, \"-\");\n}\n\n/** 从 frontmatter / 一级标题里取展示用的标题与描述。只读文件开头。 */\nfunction readMemoryMeta(file) {\n  const base = path.basename(file, \".md\");\n  try {\n    const head = fs.readFileSync(file, \"utf8\").slice(0, 8192);\n    let description = \"\";\n    const fm = /^---\\r?\\n([\\s\\S]*?)\\r?\\n---/.exec(head);\n    if (fm) {\n      const line = /^description:\\s*(.+)$/m.exec(fm[1]);\n      if (line) description = line[1].trim().replace(/^[\"']|[\"']$/g, \"\");\n    }\n    const h1 = /^#\\s+(.+)$/m.exec(head);\n    return { title: h1 ? h1[1].trim() : base, description };\n  } catch {\n    return { title: base, description: \"\" };\n  }\n}\n\n/**\n * 收集当前工作区相关的全部记忆文件，只读不改。\n *\n * 三类来源：\n *   auto     ~/.claude/projects/<slug>/memory/*.md（Claude 自己维护）\n *   project  <ws>/CLAUDE.md、<ws>/.claude/CLAUDE.md，以及上级目录链上的 CLAUDE.md\n *   user     ~/.claude/CLAUDE.md\n *\n * 返回的 path 是绝对路径，随后 memoryRead 会重新收集一遍并只认这个白名单，\n * 所以外部无法借这个动作读任意文件。\n */\nfunction collectMemory(ws) {\n  const files = [];\n  const seen = new Set();\n\n  const push = (source, root, file) => {\n    const abs = path.resolve(file);\n    if (seen.has(abs)) return;\n    let st;\n    try {\n      st = fs.statSync(abs);\n    } catch {\n      return;\n    }\n    if (!st.isFile()) return;\n    seen.add(abs);\n    const meta = readMemoryMeta(abs);\n    // 展示路径：在 root 之内就相对 root，否则相对 HOME（避免三个同名\n    // CLAUDE.md 排在一起分不清是工作区里的还是全局的）。\n    let rel = path.relative(root, abs).replace(/\\\\/g, \"/\");\n    if (!rel || rel.startsWith(\"..\")) {\n      const fromHome = path.relative(HOME, abs).replace(/\\\\/g, \"/\");\n      // 配了 CLAUDE_CONFIG_DIR 时全局文件不在 HOME 下，相对路径会是一串 ..，\n      // 这时直接给绝对路径，用户复制去编辑器才打得开。\n      rel = fromHome.startsWith(\"..\") ? abs.replace(/\\\\/g, \"/\") : \"~/\" + fromHome;\n    }\n    files.push({\n      source,\n      name: path.basename(abs),\n      rel,\n      path: abs,\n      title: meta.title,\n      description: meta.description,\n      size: st.size,\n      mtime: st.mtimeMs,\n    });\n  };\n\n  // 项目记忆：Claude Code 会从工作区向上逐级读取 CLAUDE.md。\n  // 层级限死，避免磁盘根目录上的杂项被算进来。\n  let dir = path.resolve(ws);\n  for (let depth = 0; depth < 12; depth++) {\n    push(\"project\", dir, path.join(dir, \"CLAUDE.md\"));\n    push(\"project\", dir, path.join(dir, \".claude\", \"CLAUDE.md\"));\n    const parent = path.dirname(dir);\n    if (parent === dir) break;\n    dir = parent;\n  }\n  // 新版 Claude Code 的项目规则目录，存在就一并列出。\n  const rulesDir = path.join(path.resolve(ws), \".claude\", \"rules\");\n  try {\n    for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {\n      if (entry.isFile() && entry.name.endsWith(\".md\")) {\n        push(\"project\", path.resolve(ws), path.join(rulesDir, entry.name));\n      }\n    }\n  } catch {\n    // 没有 rules 目录是常态\n  }\n\n  push(\"user\", CLAUDE_DIR, path.join(CLAUDE_DIR, \"CLAUDE.md\"));\n\n  const autoDir = path.join(CLAUDE_DIR, \"projects\", memorySlug(ws), \"memory\");\n  try {\n    for (const entry of fs.readdirSync(autoDir, { withFileTypes: true })) {\n      if (entry.isFile() && entry.name.endsWith(\".md\")) {\n        push(\"auto\", autoDir, path.join(autoDir, entry.name));\n      }\n    }\n  } catch {\n    // 这个工作区还没有自动记忆，目录不存在是正常的\n  }\n\n  // 自动记忆里 MEMORY.md 是索引，排最前；其余按修改时间倒序。\n  const order = { auto: 0, project: 1, user: 2 };\n  files.sort((a, b) => {\n    if (order[a.source] !== order[b.source]) return order[a.source] - order[b.source];\n    if (a.source === \"auto\") {\n      if (a.name === \"MEMORY.md\") return -1;\n      if (b.name === \"MEMORY.md\") return 1;\n      return b.mtime - a.mtime;\n    }\n    return a.rel.localeCompare(b.rel);\n  });\n\n  return {\n    ok: true,\n    workspace: path.resolve(ws),\n    slug: memorySlug(ws),\n    autoDir,\n    autoExists: files.some((f) => f.source === \"auto\"),\n    files,\n  };\n}\n\nconst MEMORY_READ_LIMIT = 512 * 1024;\n\nfunction readMemory(ws, target) {\n  const list = collectMemory(ws);\n  const file = list.files.find((f) => f.path === path.resolve(String(target || \"\")));\n  if (!file) throw new Error(\"记忆文件不存在，或不在可读范围内\");\n  const raw = fs.readFileSync(file.path, \"utf8\");\n  // 字节数与列表里的 size 用同一口径（stat 的 size 就是 UTF-8 字节数）；\n  // 用 raw.length 会按 UTF-16 计数，中文文件在列表和正文里显示成两个数字。\n  const bytes = Buffer.byteLength(raw, \"utf8\");\n  const truncated = bytes > MEMORY_READ_LIMIT;\n  let content = raw;\n  if (truncated) {\n    // 按字符累加字节截断：直接切 Buffer 会把多字节字符拦腰截断，\n    // 末尾变成一个乱码替换符。\n    let used = 0;\n    let cut = 0;\n    for (const ch of raw) {\n      const size = Buffer.byteLength(ch, \"utf8\");\n      if (used + size > MEMORY_READ_LIMIT) break;\n      used += size;\n      cut += ch.length;\n    }\n    content = raw.slice(0, cut);\n  }\n  return {\n    ok: true,\n    file: {\n      source: file.source,\n      name: file.name,\n      rel: file.rel,\n      path: file.path,\n      title: file.title,\n      size: file.size,\n      truncated,\n      content,\n    },\n  };\n}\n\n/**\n * 诊断区的「清理残留」对所有类型都传 state=inherit，审批也一样：\n * inherit 在这里就是「把这两个名单里的这一条删掉」，等价于回到待审批。\n * 统一在这里转一次，清理路径就不用为审批开特例。\n */\nfunction approvalStateForCleanup(state) {\n  return state === \"inherit\" ? \"pending\" : state;\n}\n\nfunction set(ws, kind, id, state) {\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  const current = readForWrite(localPath);\n  let next;\n  let effective;\n  if (kind === \"plugin\") next = setPluginState(current, id, state);\n  else if (kind === \"mcp\") next = setMcpState(current, id, state);\n  else if (kind === \"skill\") next = setSkillState(current, id, state);\n  else if (kind === \"mcpApproval\") {\n    const out = setMcpApproval(current, id, approvalStateForCleanup(state));\n    next = out.settings;\n    effective = out.effective;\n  } else throw new Error(\"未知类型：\" + kind);\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, settings: next, effective };\n}\n\n/** 一次写完多条：同类型共用一个文件，避免每行起一次子进程。 */\nfunction setMany(ws, opsJson) {\n  let ops;\n  try {\n    ops = JSON.parse(opsJson);\n  } catch {\n    throw new Error(\"批量操作的参数不是合法 JSON\");\n  }\n  if (!Array.isArray(ops) || ops.length === 0) throw new Error(\"批量操作为空\");\n  if (ops.length > 500) throw new Error(\"单次批量操作不能超过 500 项\");\n\n  const localPath = path.join(ws, PROJECT_SETTINGS_REL);\n  let next = readForWrite(localPath);\n  let applied = 0;\n  for (const op of ops) {\n    if (!op || typeof op !== \"object\") continue;\n    const { kind, id, state } = op;\n    if (kind === \"plugin\") next = setPluginState(next, id, state);\n    else if (kind === \"mcp\") next = setMcpState(next, id, state);\n    else if (kind === \"skill\") next = setSkillState(next, id, state);\n    else if (kind === \"mcpApproval\") {\n      next = setMcpApproval(next, id, approvalStateForCleanup(state)).settings;\n    }\n    else throw new Error(\"未知类型：\" + kind);\n    applied += 1;\n  }\n  writeJsonAtomic(localPath, next);\n  return { ok: true, file: localPath, applied, settings: next };\n}\n\n/* ---------------- MCP 连接自检（会真的启动 server） ---------------- */\n\n// scan 是「按配置推演会不会连上」，这里补的是「让 Claude Code 真的试一次」。\n// 两者会不一致，而这正是它存在的理由：推演讲不清的失败原因（命令不存在、\n// 启动即崩、握手超时）只有实际连一次才知道。\n//\n// 代价必须记住：**它真的会拉起 server 进程**，所以只能由用户手动触发，\n// 绝不能塞进刷新流程。\n/** server 名要交给 shell，先挡住能改变命令结构或越界的字符。 */\nfunction assertServerName(name) {\n  // 允许常见的 server 命名（含 scoped 包的 @ / : 与路径分隔），但不允许空白、\n  // 引号、分号、重定向、$ 和反引号——任何一个都能改写命令行。\n  if (typeof name !== \"string\" || !/^[A-Za-z0-9._:@/-]+$/.test(name)) {\n    throw new Error(\"server 名含有无法安全传给命令行的字符：\" + String(name));\n  }\n  // 单独的 . / .. 会被当成路径，虽然这里只是拼命令，仍一并挡掉。\n  if (name === \".\" || name === \"..\") throw new Error(\"server 名不合法：\" + name);\n}\n\n/** 把 `claude mcp get` 的输出翻成状态。纯函数，便于单测覆盖各分支。 */\nfunction parseProbeOutput(out) {\n  const lines = String(out || \"\").split(/\\r?\\n/);\n  const statusLine = lines.find((line) => /^\\s*Status:/.test(line)) || \"\";\n  const issueLine = lines.find((line) => /^\\s*Issue:/.test(line)) || \"\";\n  const detail = issueLine.replace(/^\\s*Issue:\\s*/, \"\").trim();\n\n  // 状态符号是 Claude Code 的输出契约；文字兜底一层，免得换了符号就全成 unknown。\n  let status = \"unknown\";\n  if (/^\\s*Status:\\s*✔/.test(statusLine) || /Connected/i.test(statusLine)) status = \"connected\";\n  else if (/^\\s*Status:\\s*✘/.test(statusLine) || /Failed to connect/i.test(statusLine)) status = \"failed\";\n  else if (/^\\s*Status:\\s*⏸/.test(statusLine) || /Pending approval/i.test(statusLine)) status = \"pending\";\n  else if (/^\\s*Status:\\s*⊘/.test(statusLine) || /Disabled for this project/i.test(statusLine)) status = \"disabled\";\n  // 整行都没有 Status 说明命令没跑起来（找不到 CLI 时就是这样）。\n  else if (!statusLine) status = \"no-cli\";\n\n  return { status, detail: detail || (status === \"no-cli\" ? \"找不到 claude 命令或输出无法解析\" : \"\") };\n}\n\nfunction probeMcp(ws, name) {\n  assertServerName(name);\n  const started = Date.now();\n  const r = spawnSync(\"claude mcp get \" + name, {\n    cwd: ws,\n    encoding: \"utf8\",\n    timeout: 60000,\n    windowsHide: true,\n    // Windows 上 claude 是 .cmd 包装，不起 shell 找不到可执行文件。\n    shell: true,\n  });\n  const elapsedMs = Date.now() - started;\n\n  if (r.error) {\n    const code = r.error.code || \"\";\n    if (code === \"ENOENT\") {\n      return { ok: true, name, status: \"no-cli\", detail: \"找不到 claude 命令\", elapsedMs };\n    }\n    if (code === \"ETIMEDOUT\") {\n      return { ok: true, name, status: \"timeout\", detail: \"60 秒内没有返回\", elapsedMs };\n    }\n    return { ok: true, name, status: \"error\", detail: String(r.error.message || code), elapsedMs };\n  }\n\n  const parsed = parseProbeOutput(String(r.stdout || \"\") + \"\\n\" + String(r.stderr || \"\"));\n  return { ok: true, name, status: parsed.status, detail: parsed.detail, elapsedMs };\n}\n\nfunction main() {\n  const argv = process.argv.slice(2);\n  const action = argv[0];\n  const ws = argv[1];\n  if (action === \"setMany\") {\n    if (!ws) throw new Error(\"用法：config-io.mjs setMany <workspace> <json>\");\n    if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n    process.stdout.write(JSON.stringify(setMany(ws, argv[2] || \"[]\")));\n    return;\n  }\n  if (action === \"probe\") {\n    if (!ws) throw new Error(\"用法：config-io.mjs probe <workspace> <serverName>\");\n    if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n    process.stdout.write(JSON.stringify(probeMcp(ws, argv[2])));\n    return;\n  }\n  const [, , kind, id, state] = argv;\n  if (!action || !ws) throw new Error(\"用法：config-io.mjs scan <workspace> | set <workspace> <kind> <id> <state> | memory <workspace> | memoryRead <workspace> <file> | probe <workspace> <serverName>\");\n  if (!fs.existsSync(ws)) throw new Error(\"工作区不存在：\" + ws);\n  let result = null;\n  if (action === \"scan\") result = scan(ws);\n  else if (action === \"set\") result = set(ws, kind, id, state);\n  else if (action === \"memory\") result = collectMemory(ws);\n  else if (action === \"memoryRead\") result = readMemory(ws, argv[2]);\n  if (!result) throw new Error(\"未知动作：\" + action);\n  process.stdout.write(JSON.stringify(result));\n}\n\ntry {\n  main();\n} catch (err) {\n  process.stdout.write(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));\n  process.exitCode = 1;\n}\n";
 
-const STYLE = `
+const CSS = `
 .wc-root { height: 100%; min-height: 0; position: relative; display: flex; flex-direction: column; color: inherit; background: transparent; font-size: 13px; line-height: 1.5; overflow: hidden; }
 .wc-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid rgba(127,127,127,.16); }
 .wc-title { font-size: 13px; font-weight: 600; }
@@ -1582,20 +1860,33 @@ const STYLE = `
 .wc-btn + .wc-btn { border-left: 1px solid rgba(127,127,127,.22); }
 .wc-btn.wc-on { background: rgba(79,140,255,.16); font-weight: 600; }
 .wc-btn:disabled { opacity: .38; cursor: default; }
-/* 侧栏窄：技能四态改成下拉，省下的宽度全给名字 */
-.wc-select-wrap { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.wc-select { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
-.wc-select:disabled { opacity: .38; cursor: default; }
-.wc-select-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wc-select-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
-.wc-select-caret.wc-up { transform: rotate(180deg); }
-/* 菜单必须是浮层（绝对定位）：行内展开会撑高这一行，整块列表跟着跳动。 */
-.wc-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; min-width: 112px; display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--color-background-primary-default, #232326); border: 1px solid rgba(127,127,127,.2); }
-.wc-menu.wc-menu-up { top: auto; bottom: calc(100% + 4px); }
-.wc-menu-item { font: inherit; font-size: 11.5px; text-align: left; padding: 4px 9px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
-.wc-menu-item:hover { background: rgba(127,127,127,.16); }
-.wc-menu-item.wc-on { font-weight: 600; background: rgba(127,127,127,.12); }
-.wc-menu-item:disabled { opacity: .38; cursor: default; }
+/* 侧栏窄：技能四态改成下拉，省下的宽度全给名字。
+   结构与类名来自共用包 ccgui-plugin-shared/dropdown，类名固定 wc-dd-*；
+   配色归本插件，沿用本文件通篇的 rgba(127,127,127,.x) 中性写法。 */
+.wc-dd { position: relative; --wc-pop: #ffffff; --wc-pop-line: rgba(127,127,127,.24); --wc-pop-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.dark .wc-dd, html.dark .wc-dd { --wc-pop: #17191c; --wc-pop-line: rgba(255,255,255,.14); --wc-pop-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.wc-dd-trigger { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
+.wc-dd-trigger:disabled { opacity: .38; cursor: default; }
+.wc-dd.is-open .wc-dd-trigger { border-color: rgba(79,140,255,.55); }
+.wc-dd-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-dd-value.is-empty { opacity: .55; }
+.wc-dd-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
+.wc-dd.is-open .wc-dd-caret { transform: rotate(180deg); }
+/* 菜单必须是浮层（绝对定位）：行内展开会撑高这一行，整块列表跟着跳动。
+   底色用本文件自己的 --wc-pop，不再写 var(--color-background-primary-default, #232326)
+   ——那个宿主变量的兜底值是深色，宿主没给值时浅色主题下菜单就是一块黑底。 */
+.wc-dd-scrim { position: fixed; inset: 0; z-index: 40; }
+.wc-dd-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 41; min-width: 112px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--wc-pop); border: 1px solid var(--wc-pop-line); box-shadow: var(--wc-pop-shadow); }
+.wc-dd.is-up .wc-dd-menu { top: auto; bottom: calc(100% + 4px); }
+.wc-dd-group { padding: 4px 9px 2px; font-size: 10.5px; font-weight: 600; opacity: .55; user-select: none; white-space: nowrap; }
+.wc-dd-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 4px 9px; border-radius: 5px; cursor: pointer; outline: none; white-space: nowrap; }
+.wc-dd-item.is-active { background: rgba(127,127,127,.16); }
+.wc-dd-item.is-disabled { opacity: .38; cursor: default; }
+.wc-dd-item.is-disabled.is-active { background: transparent; }
+.wc-dd-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-dd-check { flex: none; font-size: 11px; color: #4f8cff; opacity: 0; }
+.wc-dd-item[aria-selected="true"] .wc-dd-check { opacity: 1; }
+.wc-dd-empty { padding: 6px 9px; font-size: 11.5px; opacity: .55; }
 .wc-seg-unknown { padding: 0; }
 /* 项目 .mcp.json 的审批：和「禁用」并排的第二根轴 */
 .wc-row-actions { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -2264,78 +2555,17 @@ export default function activate(ctx) {
   }
 
   /**
-   * 侧栏用的自绘下拉。
-   * 不用 <select>：Windows 下它会渲染成系统原生控件，和宿主界面完全不是一套外观。
-   * 菜单是绝对定位浮层，不占文档流——行内展开会把这一行撑高，整块列表跟着跳。
-   * 用 absolute 而不是 fixed：滚动的容器会跟随，菜单不会飘在半空，
-   * 也绕开了 fixed 在带 transform 的祖先里会错位的问题。
+   * 侧栏用的下拉。实现在共用包 `ccgui-plugin-shared/dropdown`，构建期内联。
+   *
+   * 原来这里有一份 66 行的自绘实现，是三个插件之外的第**四**份手抄：
+   * 它没有任何 onKeyDown，纯鼠标才能操作；浮层底色还写着
+   * `var(--color-background-primary-default, #232326)`，兜底是深色，
+   * 浅色主题下菜单是一块黑底。这两条都是接共用库时一并修掉的。
+   *
+   * 本插件原来有、共用库补上的能力：分组（技能五档按组显示）、
+   * 按值禁用（isDisabled 回调）、选项 tooltip（"仅名称 / 仅手动"不看说明判断不了）。
    */
-  function SkillSelect({ opts, current, disabledFor, busy, title, onPick }) {
-    const [open, setOpen] = useState(false);
-    const [up, setUp] = useState(false);
-    const wrapRef = useRef(null);
-    const currentLabel = (opts.find(([, value]) => value === current) || opts[0] || [""])[0];
-
-    // 菜单挂在按钮所在的 wrap 里，点到别处就收起来。
-    // 测试替身没有真实 DOM（ref.current 为空），直接跳过。
-    useEffect(() => {
-      if (!open) return;
-      const wrap = wrapRef.current;
-      if (!wrap || typeof document === "undefined" || typeof document.addEventListener !== "function") return;
-      const onDown = (ev) => {
-        if (wrap.contains && ev && wrap.contains(ev.target)) return;
-        setOpen(false);
-      };
-      document.addEventListener("mousedown", onDown);
-      return () => { document.removeEventListener("mousedown", onDown); };
-    }, [open]);
-
-    function toggle(ev) {
-      if (open) { setOpen(false); return; }
-      // 下方放不下就向上翻，否则最后一行展开会被滚动容器裁掉一截。
-      const el = ev && ev.currentTarget;
-      if (el && typeof el.getBoundingClientRect === "function" && typeof window !== "undefined") {
-        const r = el.getBoundingClientRect();
-        const vh = window.innerHeight || 0;
-        const needed = opts.length * 26 + 14;
-        setUp(vh > 0 && r.bottom + needed > vh - 8);
-      } else {
-        setUp(false);
-      }
-      setOpen(true);
-    }
-
-    return h("div", { className: "wc-select-wrap", ref: wrapRef },
-      h("button", {
-        type: "button",
-        className: "wc-select" + (busy ? " wc-busy" : "") + (open ? " wc-open" : ""),
-        disabled: busy,
-        title,
-        "aria-haspopup": "listbox",
-        "aria-expanded": open ? "true" : "false",
-        onClick: toggle,
-      },
-        h("span", { className: "wc-select-label" }, currentLabel),
-        h("span", { className: "wc-select-caret" + (open ? " wc-up" : "") })
-      ),
-      open
-        ? h("div", { className: "wc-menu" + (up ? " wc-menu-up" : ""), role: "listbox" },
-            opts.map(([label, value]) => h("button", {
-              key: value,
-              type: "button",
-              role: "option",
-              className: "wc-menu-item" + (value === current ? " wc-on" : ""),
-              disabled: disabledFor(value),
-              // 「仅名称 / 仅手动」不看说明很难懂，悬停要给出完整含义。
-              title: value === "inherit"
-                ? "不写项目配置，沿用全局或团队配置"
-                : (SKILL_TIP[value] || undefined),
-              "aria-selected": value === current ? "true" : "false",
-              onClick: () => { setOpen(false); onPick(value); },
-            }, label)))
-        : null
-    );
-  }
+  const SkillSelect = createDropdown(() => ctx.react, { prefix: "wc" });
 
   function Seg({ row, compact }) {
     const team = teamTouched(row);
@@ -2379,11 +2609,30 @@ export default function activate(ctx) {
     // 在宿主的界面里非常突兀。
     if (compact && opts.length > 3) {
       const current = opts.some(([, value]) => value === active) ? active : "inherit";
+      // 共用库的选项形状是 { value, label, title }，本插件的数据是 [label, value] 二元组；
+      // 转换放在这里，别把业务数据改成库的形状。
+      const items = opts.map(([label, value]) => ({
+        value,
+        label,
+        title:
+          value === "inherit"
+            ? followTitle
+            : value === "on" && !row.allowOn
+              ? "当前无法启用"
+              : SKILL_TIP[value] || undefined,
+      }));
       return h(SkillSelect, {
-        opts, current, disabledFor,
-        busy: row.busy,
+        items,
+        value: current,
+        placeholder: "技能可见性",
+        // 禁用条件依赖选项值，所以走回调而不是逐项写 disabled。
+        isDisabled: (it) => disabledFor(it.value),
+        // 忙碌时整个下拉禁用（apply 期间再点会覆盖正在进行的写盘）。
+        disabled: Boolean(row.busy),
         title: "技能可见性：" + (SKILL_TIP[active] || ""),
-        onPick: (value) => { if (!row.busy && value !== current) void apply(row, value); },
+        onChange: (value) => {
+          if (!row.busy && value !== current) void apply(row, value);
+        },
       });
     }
     return h("div", { className: "wc-seg" },
@@ -3287,7 +3536,7 @@ export default function activate(ctx) {
     );
   }
 
-  ctx.theme.injectCss(STYLE);
+  ctx.theme.injectCss(CSS);
 
   // 插件打开时先同步一次，别让用户先看到空列表再等下一个轮询。
   void syncHostWorkspace();

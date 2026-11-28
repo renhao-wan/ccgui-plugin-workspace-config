@@ -34,7 +34,7 @@ const FEEDBACK_TIMEOUT_MS = 15000;
 
 /*__SCAN_SOURCE__*/
 
-const STYLE = `
+const CSS = `
 .wc-root { height: 100%; min-height: 0; position: relative; display: flex; flex-direction: column; color: inherit; background: transparent; font-size: 13px; line-height: 1.5; overflow: hidden; }
 .wc-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid rgba(127,127,127,.16); }
 .wc-title { font-size: 13px; font-weight: 600; }
@@ -210,20 +210,33 @@ const STYLE = `
 .wc-btn + .wc-btn { border-left: 1px solid rgba(127,127,127,.22); }
 .wc-btn.wc-on { background: rgba(79,140,255,.16); font-weight: 600; }
 .wc-btn:disabled { opacity: .38; cursor: default; }
-/* 侧栏窄：技能四态改成下拉，省下的宽度全给名字 */
-.wc-select-wrap { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.wc-select { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
-.wc-select:disabled { opacity: .38; cursor: default; }
-.wc-select-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wc-select-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
-.wc-select-caret.wc-up { transform: rotate(180deg); }
-/* 菜单必须是浮层（绝对定位）：行内展开会撑高这一行，整块列表跟着跳动。 */
-.wc-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; min-width: 112px; display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--color-background-primary-default, #232326); border: 1px solid rgba(127,127,127,.2); }
-.wc-menu.wc-menu-up { top: auto; bottom: calc(100% + 4px); }
-.wc-menu-item { font: inherit; font-size: 11.5px; text-align: left; padding: 4px 9px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
-.wc-menu-item:hover { background: rgba(127,127,127,.16); }
-.wc-menu-item.wc-on { font-weight: 600; background: rgba(127,127,127,.12); }
-.wc-menu-item:disabled { opacity: .38; cursor: default; }
+/* 侧栏窄：技能四态改成下拉，省下的宽度全给名字。
+   结构与类名来自共用包 ccgui-plugin-shared/dropdown，类名固定 wc-dd-*；
+   配色归本插件，沿用本文件通篇的 rgba(127,127,127,.x) 中性写法。 */
+.wc-dd { position: relative; --wc-pop: #ffffff; --wc-pop-line: rgba(127,127,127,.24); --wc-pop-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.dark .wc-dd, html.dark .wc-dd { --wc-pop: #17191c; --wc-pop-line: rgba(255,255,255,.14); --wc-pop-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.wc-dd-trigger { display: inline-flex; align-items: center; gap: 5px; max-width: 96px; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid rgba(127,127,127,.26); border-radius: 7px; background: rgba(127,127,127,.05); color: inherit; cursor: pointer; }
+.wc-dd-trigger:disabled { opacity: .38; cursor: default; }
+.wc-dd.is-open .wc-dd-trigger { border-color: rgba(79,140,255,.55); }
+.wc-dd-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-dd-value.is-empty { opacity: .55; }
+.wc-dd-caret { flex: none; width: 0; height: 0; border-left: 3px solid transparent; border-right: 3px solid transparent; border-top: 4px solid currentColor; opacity: .55; }
+.wc-dd.is-open .wc-dd-caret { transform: rotate(180deg); }
+/* 菜单必须是浮层（绝对定位）：行内展开会撑高这一行，整块列表跟着跳动。
+   底色用本文件自己的 --wc-pop，不再写 var(--color-background-primary-default, #232326)
+   ——那个宿主变量的兜底值是深色，宿主没给值时浅色主题下菜单就是一块黑底。 */
+.wc-dd-scrim { position: fixed; inset: 0; z-index: 40; }
+.wc-dd-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 41; min-width: 112px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding: 4px; border-radius: 8px; background: var(--wc-pop); border: 1px solid var(--wc-pop-line); box-shadow: var(--wc-pop-shadow); }
+.wc-dd.is-up .wc-dd-menu { top: auto; bottom: calc(100% + 4px); }
+.wc-dd-group { padding: 4px 9px 2px; font-size: 10.5px; font-weight: 600; opacity: .55; user-select: none; white-space: nowrap; }
+.wc-dd-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 4px 9px; border-radius: 5px; cursor: pointer; outline: none; white-space: nowrap; }
+.wc-dd-item.is-active { background: rgba(127,127,127,.16); }
+.wc-dd-item.is-disabled { opacity: .38; cursor: default; }
+.wc-dd-item.is-disabled.is-active { background: transparent; }
+.wc-dd-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-dd-check { flex: none; font-size: 11px; color: #4f8cff; opacity: 0; }
+.wc-dd-item[aria-selected="true"] .wc-dd-check { opacity: 1; }
+.wc-dd-empty { padding: 6px 9px; font-size: 11.5px; opacity: .55; }
 .wc-seg-unknown { padding: 0; }
 /* 项目 .mcp.json 的审批：和「禁用」并排的第二根轴 */
 .wc-row-actions { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -892,78 +905,17 @@ export default function activate(ctx) {
   }
 
   /**
-   * 侧栏用的自绘下拉。
-   * 不用 <select>：Windows 下它会渲染成系统原生控件，和宿主界面完全不是一套外观。
-   * 菜单是绝对定位浮层，不占文档流——行内展开会把这一行撑高，整块列表跟着跳。
-   * 用 absolute 而不是 fixed：滚动的容器会跟随，菜单不会飘在半空，
-   * 也绕开了 fixed 在带 transform 的祖先里会错位的问题。
+   * 侧栏用的下拉。实现在共用包 `ccgui-plugin-shared/dropdown`，构建期内联。
+   *
+   * 原来这里有一份 66 行的自绘实现，是三个插件之外的第**四**份手抄：
+   * 它没有任何 onKeyDown，纯鼠标才能操作；浮层底色还写着
+   * `var(--color-background-primary-default, #232326)`，兜底是深色，
+   * 浅色主题下菜单是一块黑底。这两条都是接共用库时一并修掉的。
+   *
+   * 本插件原来有、共用库补上的能力：分组（技能五档按组显示）、
+   * 按值禁用（isDisabled 回调）、选项 tooltip（"仅名称 / 仅手动"不看说明判断不了）。
    */
-  function SkillSelect({ opts, current, disabledFor, busy, title, onPick }) {
-    const [open, setOpen] = useState(false);
-    const [up, setUp] = useState(false);
-    const wrapRef = useRef(null);
-    const currentLabel = (opts.find(([, value]) => value === current) || opts[0] || [""])[0];
-
-    // 菜单挂在按钮所在的 wrap 里，点到别处就收起来。
-    // 测试替身没有真实 DOM（ref.current 为空），直接跳过。
-    useEffect(() => {
-      if (!open) return;
-      const wrap = wrapRef.current;
-      if (!wrap || typeof document === "undefined" || typeof document.addEventListener !== "function") return;
-      const onDown = (ev) => {
-        if (wrap.contains && ev && wrap.contains(ev.target)) return;
-        setOpen(false);
-      };
-      document.addEventListener("mousedown", onDown);
-      return () => { document.removeEventListener("mousedown", onDown); };
-    }, [open]);
-
-    function toggle(ev) {
-      if (open) { setOpen(false); return; }
-      // 下方放不下就向上翻，否则最后一行展开会被滚动容器裁掉一截。
-      const el = ev && ev.currentTarget;
-      if (el && typeof el.getBoundingClientRect === "function" && typeof window !== "undefined") {
-        const r = el.getBoundingClientRect();
-        const vh = window.innerHeight || 0;
-        const needed = opts.length * 26 + 14;
-        setUp(vh > 0 && r.bottom + needed > vh - 8);
-      } else {
-        setUp(false);
-      }
-      setOpen(true);
-    }
-
-    return h("div", { className: "wc-select-wrap", ref: wrapRef },
-      h("button", {
-        type: "button",
-        className: "wc-select" + (busy ? " wc-busy" : "") + (open ? " wc-open" : ""),
-        disabled: busy,
-        title,
-        "aria-haspopup": "listbox",
-        "aria-expanded": open ? "true" : "false",
-        onClick: toggle,
-      },
-        h("span", { className: "wc-select-label" }, currentLabel),
-        h("span", { className: "wc-select-caret" + (open ? " wc-up" : "") })
-      ),
-      open
-        ? h("div", { className: "wc-menu" + (up ? " wc-menu-up" : ""), role: "listbox" },
-            opts.map(([label, value]) => h("button", {
-              key: value,
-              type: "button",
-              role: "option",
-              className: "wc-menu-item" + (value === current ? " wc-on" : ""),
-              disabled: disabledFor(value),
-              // 「仅名称 / 仅手动」不看说明很难懂，悬停要给出完整含义。
-              title: value === "inherit"
-                ? "不写项目配置，沿用全局或团队配置"
-                : (SKILL_TIP[value] || undefined),
-              "aria-selected": value === current ? "true" : "false",
-              onClick: () => { setOpen(false); onPick(value); },
-            }, label)))
-        : null
-    );
-  }
+  const SkillSelect = createDropdown(() => ctx.react, { prefix: "wc" });
 
   function Seg({ row, compact }) {
     const team = teamTouched(row);
@@ -1007,11 +959,30 @@ export default function activate(ctx) {
     // 在宿主的界面里非常突兀。
     if (compact && opts.length > 3) {
       const current = opts.some(([, value]) => value === active) ? active : "inherit";
+      // 共用库的选项形状是 { value, label, title }，本插件的数据是 [label, value] 二元组；
+      // 转换放在这里，别把业务数据改成库的形状。
+      const items = opts.map(([label, value]) => ({
+        value,
+        label,
+        title:
+          value === "inherit"
+            ? followTitle
+            : value === "on" && !row.allowOn
+              ? "当前无法启用"
+              : SKILL_TIP[value] || undefined,
+      }));
       return h(SkillSelect, {
-        opts, current, disabledFor,
-        busy: row.busy,
+        items,
+        value: current,
+        placeholder: "技能可见性",
+        // 禁用条件依赖选项值，所以走回调而不是逐项写 disabled。
+        isDisabled: (it) => disabledFor(it.value),
+        // 忙碌时整个下拉禁用（apply 期间再点会覆盖正在进行的写盘）。
+        disabled: Boolean(row.busy),
         title: "技能可见性：" + (SKILL_TIP[active] || ""),
-        onPick: (value) => { if (!row.busy && value !== current) void apply(row, value); },
+        onChange: (value) => {
+          if (!row.busy && value !== current) void apply(row, value);
+        },
       });
     }
     return h("div", { className: "wc-seg" },
@@ -1915,7 +1886,7 @@ export default function activate(ctx) {
     );
   }
 
-  ctx.theme.injectCss(STYLE);
+  ctx.theme.injectCss(CSS);
 
   // 插件打开时先同步一次，别让用户先看到空列表再等下一个轮询。
   void syncHostWorkspace();

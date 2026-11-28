@@ -766,7 +766,9 @@ fs.writeFileSync(localPath, JSON.stringify({
     tree = R.renderKeep(Panel, { workspacePath: ws });
     const skillRowPanel = byClassAll(tree, "wc-row").find((n) => textOf(n).includes("project-skill"));
     assert.ok(skillRowPanel, "侧栏技能列表缺少 project-skill");
-    const selects = byClassAll(skillRowPanel, "wc-select");
+    // 类名由共用包 ccgui-plugin-shared/dropdown 固定为 wc-dd-*，
+    // 本插件只负责配色；这里断言的是库的契约，改名必须同步改这里。
+    const selects = byClassAll(skillRowPanel, "wc-dd-trigger");
     assert.equal(selects.length, 1, "侧栏技能应渲染成一个下拉而不是五个按钮");
     assert.equal(byClassAll(skillRowPanel, "wc-seg").length, 0, "侧栏技能不该同时渲染按钮组");
     // 必须是自绘下拉：原生 <select> 在 Windows 上会露出系统控件的外观。
@@ -774,37 +776,54 @@ fs.writeFileSync(localPath, JSON.stringify({
     assert.equal(findAll(skillRowPanel, (n) => n && n.type === "select").length, 0,
       "侧栏不允许出现原生 <select> 控件");
     assert.equal(textOf(selects[0]), "仅名称", "侧栏下拉的当前值应与文件里的 name-only 一致");
+    // 旧实现只挂鼠标事件，键盘完全不可用。键盘处理必须挂在容器上——
+    // 菜单打开后焦点在 option 里，事件靠冒泡上来；挂 trigger 上的话方向键会失灵。
+    const ddBox = byClassAll(skillRowPanel, "wc-dd")[0];
+    assert.ok(ddBox, "侧栏技能缺少下拉容器");
+    assert.equal(typeof ddBox.props.onKeyDown, "function", "下拉容器必须挂键盘处理");
     // 展开后五档都在，当前项要高亮；再点一次收起。
     selects[0].props.onClick();
     tree = R.renderKeep(Panel, { workspacePath: ws });
     const rowOpen = byClassAll(tree, "wc-row").find((n) => textOf(n).includes("project-skill"));
-    const menuItems = byClassAll(rowOpen, "wc-menu-item");
+    const menuItems = byClassAll(rowOpen, "wc-dd-item");
     assert.equal(menuItems.length, 5, "自绘下拉展开后应有五档");
     // 菜单必须是浮层：行内展开会撑高这一行，整块列表跟着跳（用户反馈过）。
-    const menuRule = (capturedCss.match(/\.wc-menu\s*\{[^}]*\}/) || [""])[0];
-    assert.ok(menuRule, "样式里找不到 .wc-menu");
+    const menuRule = (capturedCss.match(/\.wc-dd-menu\s*\{[^}]*\}/) || [""])[0];
+    assert.ok(menuRule, "样式里找不到 .wc-dd-menu");
     assert.match(menuRule, /position:\s*absolute/, "下拉菜单必须是浮层，不能占文档流");
     assert.equal(/position:\s*(static|relative)/.test(menuRule), false, "菜单不能参与行内布局");
-    const wrapRule = (capturedCss.match(/\.wc-select-wrap\s*\{[^}]*\}/) || [""])[0];
+    // 浮层底色不能来自宿主变量：`var(--color-background-primary-default, #232326)`
+    // 的兜底是深色，浅色主题下菜单是一块黑底（leetcode 就是这么黑的）。
+    assert.equal(/--color-background/.test(menuRule), false,
+      "菜单底色不能依赖宿主 token——它的兜底值是深色，浅色主题下会变成黑块");
+    const wrapRule = (capturedCss.match(/\.wc-dd\s*\{[^}]*\}/) || [""])[0];
     assert.match(wrapRule, /position:\s*relative/, "浮层要相对下拉按钮定位");
-    assert.match(capturedCss, /\.wc-menu\.wc-menu-up\s*\{[^}]*bottom:\s*calc\(100% \+ 4px\)/,
+    assert.match(capturedCss, /\.wc-dd\.is-up \.wc-dd-menu\s*\{[^}]*bottom:[^}]*100%/,
       "缺少向上翻转的规则：最后一行的菜单会被滚动容器裁掉");
-    assert.equal(byClassAll(rowOpen, "wc-menu-up").length, 0,
+    assert.equal(byClassAll(rowOpen, "is-up").length, 0,
       "拿不到按钮坐标时应默认向下展开");
-    const currentItem = menuItems.find((n) => String(n.props.className || "").split(/\s+/).includes("wc-on"));
-    assert.ok(currentItem, "下拉里当前档位没有高亮");
-    assert.equal(textOf(currentItem), "仅名称", "高亮的应是当前值 name-only");
-    // 「仅名称 / 仅手动」这两个词不悬停说明看不懂，菜单项必须带完整解释。
-    const nameOnlyItem = menuItems.find((n) => textOf(n) === "仅名称");
+    const currentItem = menuItems.find((n) => n.props["aria-selected"] === true);
+    assert.ok(currentItem, "下拉里当前档位没有标记为选中");
+    // 选项里还有一个用作选中标记的 .wc-dd-check（内容就是 ✓），看文字要取 label。
+    const currentLabel = byClassAll(currentItem, "wc-dd-label")[0];
+    assert.equal(textOf(currentLabel), "仅名称", "选中的应是当前值 name-only");
+    // 「仅名称 / 仅手动」这两个词不看说明判断不了，菜单项必须带完整解释（title）。
+    // 选项的文字里恒有那个 ✓（靠 opacity 显隐），所以按 label 子节点找。
+    const itemByLabel = (word) =>
+      menuItems.find((n) => {
+        const lb = byClassAll(n, "wc-dd-label")[0];
+        return lb && textOf(lb) === word;
+      });
+    const nameOnlyItem = itemByLabel("仅名称");
     assert.match(String(nameOnlyItem && nameOnlyItem.props.title || ""), /描述/,
       "「仅名称」的菜单项要说明省掉描述");
-    const manualItem = menuItems.find((n) => textOf(n) === "仅手动");
+    const manualItem = itemByLabel("仅手动");
     assert.match(String(manualItem && manualItem.props.title || ""), /隐藏/,
       "「仅手动」的菜单项要说明对 Claude 隐藏");
     assert.ok(!textOf(tree).includes("undefined"), "侧栏技能下拉文案里出现了 undefined");
-    byClassAll(rowOpen, "wc-select")[0].props.onClick();
+    byClassAll(rowOpen, "wc-dd-trigger")[0].props.onClick();
     tree = R.renderKeep(Panel, { workspacePath: ws });
-    assert.equal(byClassAll(tree, "wc-menu-item").length, 0, "再次点击下拉应收起菜单");
+    assert.equal(byClassAll(tree, "wc-dd-item").length, 0, "再次点击下拉应收起菜单");
     byClassAll(tree, "wc-tab")[1].props.onClick();
     tree = R.renderKeep(Panel, { workspacePath: ws });
   }
