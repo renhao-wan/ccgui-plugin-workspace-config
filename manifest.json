@@ -21,6 +21,7 @@
     "plugin.storage",
     "theme",
     "host:workspace",
+    "workspace.metadata.read",
     "exec:node",
     "network:ccgui-feedback.2653990378.workers.dev"
   ]

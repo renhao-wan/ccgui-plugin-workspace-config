@@ -16,6 +16,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.2.1"
+    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.2.2"
   }
 }
